@@ -46,6 +46,7 @@ class _HttpLlmMixin:
         self.timeout_sec = float(llm_cfg.get("request_timeout_sec", 8))
         self.max_retries = int(llm_cfg.get("max_retries", 2))
         self.api_key_env = str(llm_cfg.get("api_key_env", "CHAMICLAW_LLM_API_KEY"))
+        self.default_model = str(llm_cfg.get("model", "")).strip() or os.getenv("CHAMICLAW_LLM_MODEL", "").strip()
 
     def _auth_headers(self) -> dict[str, str]:
         key = os.getenv(self.api_key_env, "").strip()
@@ -64,6 +65,56 @@ class _HttpLlmMixin:
                     time.sleep(min(2.0, 0.2 * (2**attempt)))
         raise LlmProviderError(f"LLM request failed after retries: {last_err}")
 
+    def _openai_payload(self, task: str, market_prob: float, fair_prob: float | None, features: dict[str, Any]) -> dict[str, Any]:
+        model = self.default_model or "moonshotai/Kimi-K2.5"
+        schema_hint = {
+            "fair_prob": 0.5,
+            "confidence": 0.7,
+            "rationale": "short reason",
+            "risk_tags": [],
+        }
+        if task == "llm2_validate":
+            schema_hint["validated_fair_prob"] = 0.5
+        user_payload = {
+            "task": task,
+            "market_prob": market_prob,
+            "fair_prob": fair_prob,
+            "features": features,
+            "output_json_schema": schema_hint,
+        }
+        return {
+            "model": model,
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Return strictly JSON object with numeric probabilities in [0,1].",
+                },
+                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=True)},
+            ],
+        }
+
+    def _normalize_output(self, out: dict[str, Any], fallback_fair: float | None = None) -> dict[str, Any]:
+        # Native JSON endpoint
+        if "fair_prob" in out or "validated_fair_prob" in out:
+            return out
+
+        # OpenAI-compatible chat response
+        choices = out.get("choices")
+        if isinstance(choices, list) and choices:
+            msg = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                try:
+                    parsed = json.loads(content)
+                except json.JSONDecodeError as exc:
+                    raise LlmProviderError(f"chat completion content is not JSON: {exc}")
+                if isinstance(parsed, dict):
+                    return parsed
+
+        raise LlmProviderError("LLM response missing expected fields")
+
 
 class Llm1Generator(_HttpLlmMixin):
     def __init__(self, config: dict[str, Any]) -> None:
@@ -77,7 +128,10 @@ class Llm1Generator(_HttpLlmMixin):
                 "market_prob": market_prob,
                 "features": features,
             }
+            if "/chat/completions" in self.endpoint:
+                payload = self._openai_payload("llm1_fair_prob", market_prob=market_prob, fair_prob=None, features=features)
             out = self._request_with_retry(self.endpoint, payload)
+            out = self._normalize_output(out)
             req_id = str(out.get("request_id") or out.get("id") or "")
             rationale = str(out.get("rationale", "http_llm1"))
             if req_id:
@@ -89,7 +143,6 @@ class Llm1Generator(_HttpLlmMixin):
                 risk_tags=list(out.get("risk_tags", [])),
             )
 
-        # Mock baseline: regress to 0.5 by volatility and imbalance.
         imbalance = float(features.get("depth_imbalance", 0))
         sigma = float(features.get("sigma_5m", 0))
         fair = min(0.99, max(0.01, market_prob + 0.05 * imbalance - 0.2 * sigma))
@@ -109,7 +162,10 @@ class Llm2Validator(_HttpLlmMixin):
                 "fair_prob": fair_prob,
                 "features": features,
             }
+            if "/chat/completions" in self.endpoint:
+                payload = self._openai_payload("llm2_validate", market_prob=market_prob, fair_prob=fair_prob, features=features)
             out = self._request_with_retry(self.endpoint, payload)
+            out = self._normalize_output(out)
             req_id = str(out.get("request_id") or out.get("id") or "")
             rationale = str(out.get("rationale", "http_llm2"))
             if req_id:
