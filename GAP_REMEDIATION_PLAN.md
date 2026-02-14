@@ -30,7 +30,8 @@
 - 信号掉落已细分为（最新）：
   - `EDGE_AFTER_COST_BELOW_THRESHOLD=12`
   - `RAW_EDGE_BELOW_THRESHOLD=7`
-- 已完成一版 reachability 修复：research 模式阈值放松（仅 dry-run 生效），信号由 0 提升到可产出。
+- 已完成一版 reachability 修复：research 模式阈值放松（仅 dry-run 生效），信号由 0 提升到可产出（稳定 2 条/轮左右）。
+- Go/No-Go 已升级并通过最新验证（在研究策略门槛下）：`final_verdict=GO`。
 - 结论：当前主要阻塞在 **edge 与阈值/成本口径**，并非单纯风控或执行失败。
 - 结论：目前仍适合“数据与研究验证”，不适合直接实盘。
 

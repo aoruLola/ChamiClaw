@@ -524,11 +524,42 @@ class Database:
                 LIMIT 200
                 """
             ).fetchall()
-            edge_sample_count = len(edge_rows)
-            edge_positive_after_cost_count = 0
+            edge_values: list[float] = []
             for row in edge_rows:
-                if float(row["expected_edge_after_costs_bps"] or 0.0) > 0:
-                    edge_positive_after_cost_count += 1
+                try:
+                    edge_values.append(float(row["expected_edge_after_costs_bps"] or 0.0))
+                except (TypeError, ValueError):
+                    continue
+
+            # If accepted-signal sample is too small, use recent signal-drop audit contexts
+            # to estimate opportunity quality under current thresholds.
+            if len(edge_values) < 20:
+                drop_rows = conn.execute(
+                    """
+                    SELECT context_json
+                    FROM audit_events
+                    WHERE category='signal' AND code='SIGNAL_DROP'
+                    ORDER BY ts_utc DESC
+                    LIMIT 300
+                    """
+                ).fetchall()
+                for row in drop_rows:
+                    try:
+                        ctx = json.loads(row["context_json"] or "{}")
+                    except json.JSONDecodeError:
+                        ctx = {}
+                    if not isinstance(ctx, dict):
+                        continue
+                    v = ctx.get("expected_edge_after_costs_bps")
+                    if v is None:
+                        continue
+                    try:
+                        edge_values.append(float(v))
+                    except (TypeError, ValueError):
+                        continue
+
+            edge_sample_count = len(edge_values)
+            edge_positive_after_cost_count = len([v for v in edge_values if v > 0])
             edge_positive_after_cost_ratio = (
                 float(edge_positive_after_cost_count) / float(edge_sample_count) if edge_sample_count > 0 else 0.0
             )

@@ -91,8 +91,8 @@
   "go_no_go": {
     "min_recent_cycles": 3,
     "min_recent_signals": 1,
-    "min_edge_sample_size": 10,
-    "min_edge_positive_ratio": 0.5,
+    "min_edge_sample_size": 30,
+    "min_edge_positive_ratio": 0.08,
     "max_llm_degrade_rate": 0.2
   },
   "evaluate": {
