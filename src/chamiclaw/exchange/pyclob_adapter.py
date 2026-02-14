@@ -81,8 +81,8 @@ class PyClobAdapter:
 
         derived = self.create_or_derive_api_creds()
         api_key = str(derived.get("apiKey") or derived.get("api_key") or "").strip()
-        secret = str(derived.get("secret") or "").strip()
-        passphrase = str(derived.get("passphrase") or "").strip()
+        secret = str(derived.get("secret") or derived.get("api_secret") or "").strip()
+        passphrase = str(derived.get("passphrase") or derived.get("api_passphrase") or "").strip()
         if not (api_key and secret and passphrase):
             raise PyClobAdapterError("unable to derive complete api creds")
 
@@ -110,11 +110,19 @@ class PyClobAdapter:
 
     def create_or_derive_api_creds(self) -> dict[str, Any]:
         client = self._build_client(with_creds=False)
-        if hasattr(client, "create_or_derive_api_key"):
+        out: Any = None
+        if hasattr(client, "create_or_derive_api_creds"):
+            out = _run_maybe_async(client.create_or_derive_api_creds())
+        elif hasattr(client, "create_or_derive_api_key"):
             out = _run_maybe_async(client.create_or_derive_api_key())
-            if isinstance(out, dict):
-                return out
-        raise PyClobAdapterError("create_or_derive_api_key not available on py-clob-client")
+        else:
+            raise PyClobAdapterError("create_or_derive_api_creds not available on py-clob-client")
+
+        if isinstance(out, dict):
+            return out
+        if hasattr(out, "__dict__") and isinstance(out.__dict__, dict):
+            return dict(out.__dict__)
+        raise PyClobAdapterError("unsupported api creds response type")
 
     def place_limit_order(self, token_id: str, side: str, price: float, size: float) -> PyClobOrderResult:
         client = self._build_client(with_creds=True)

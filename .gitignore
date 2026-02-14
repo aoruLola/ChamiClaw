@@ -5,3 +5,4 @@ __pycache__/
 logs/*.jsonl
 data/*.db
 reports/*.json
+data/polymarket_api_creds.json
