@@ -97,11 +97,21 @@ class PyClobAdapter:
 
         if with_creds:
             creds = self._ensure_api_creds()
+            creds_obj = creds
+            try:
+                from py_clob_client.clob_types import ApiCreds  # type: ignore
+                creds_obj = ApiCreds(
+                    api_key=str(creds.get("api_key", "")),
+                    api_secret=str(creds.get("secret", "")),
+                    api_passphrase=str(creds.get("passphrase", "")),
+                )
+            except Exception:
+                creds_obj = creds
             return self._ClobClient(
                 host=self.host,
                 chain_id=self.chain_id,
                 key=self.private_key,
-                creds=creds,
+                creds=creds_obj,
                 signature_type=self.signature_type,
                 funder=self.funder or None,
             )
