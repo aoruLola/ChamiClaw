@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 
 from chamiclaw.exchange.endpoints import load_clob_endpoints, load_clob_field_map
 from chamiclaw.exchange.normalize import normalize_order_status, parse_order_response
+from chamiclaw.ops.secrets import get_runtime_role
 from chamiclaw.utils.time import utc_now_iso
 
 
@@ -131,9 +132,31 @@ class ExecutionEngine:
 
         return OrderResult(order_id=final_order_id, status="canceled", reason="retry_exhausted", retries=total_retries)
 
+    def _live_precheck_failures(self) -> list[str]:
+        failures: list[str] = []
+        if not self.base_url:
+            failures.append("clob_base_missing")
+        if not os.getenv("CLOB_API_KEY", "").strip():
+            failures.append("CLOB_API_KEY_missing")
+        if get_runtime_role() != "execution":
+            failures.append("runtime_role_not_execution")
+        if not self.endpoints.submit_order or not self.endpoints.order_status or not self.endpoints.cancel_order:
+            failures.append("clob_endpoints_incomplete")
+        return failures
+
     def place_limit_order(self, signal: dict, limit_price: float, quantity: float) -> OrderResult:
         if self.execution_cfg.get("dry_run", True):
             return OrderResult(order_id=str(uuid.uuid4()), status="submitted", reason="dry_run", retries=0)
+
+        failures = self._live_precheck_failures()
+        if failures:
+            return OrderResult(
+                order_id=str(uuid.uuid4()),
+                status="rejected",
+                reason="live_precheck_failed:" + ",".join(failures),
+                retries=0,
+            )
+
         return self._place_live_order(signal=signal, limit_price=limit_price, quantity=quantity)
 
     def build_order_intent(self, signal: dict, quote: dict, market: dict, risk_snapshot: dict | None = None) -> dict:
