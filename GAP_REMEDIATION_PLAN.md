@@ -24,10 +24,14 @@
 - `report`：可用（可输出日报）
 
 ### 3) 关键现状问题（2026-02-14 最新实测）
-- `run-once` 本次可运行，但历史曾出现外层执行被 SIGKILL，稳定性仍需持续观察。
-- 当前统计：`markets=214`、`quotes=2057`、`signals=0`、`orders=0`、`audit_events=3`。
-- 最新 `run-once` 返回：`scanned_markets=132`、`quotes_written=132`、`signals_generated=0`、`orders_submitted=0`。
-- `signal_drop_counts` 已显示 `EDGE_BELOW_ENTER_THRESHOLD=20`，说明当前主要阻塞在“进场阈值过高/有效 edge 不足”。
+- `run-once` 当前可运行（近期未复现卡死），但仍需继续观察长跑稳定性。
+- 当前统计：`markets=219`、`quotes=2578`、`signals=0`、`orders=0`、`audit_events=27`。
+- 最新 `run-once` 返回：`scanned_markets=129`、`quotes_written=129`、`signals_generated=0`、`orders_submitted=0`。
+- 信号掉落已细分为：
+  - `RAW_EDGE_BELOW_THRESHOLD=11`
+  - `EDGE_AFTER_COST_BELOW_THRESHOLD=8`
+  - `LOW_CONFIDENCE=1`
+- 结论：当前主要阻塞在 **edge 与阈值/成本口径**，并非单纯风控或执行失败。
 - 结论：目前仍适合“数据与研究验证”，不适合直接实盘。
 
 ### 4) 最新优先级（按阻塞程度）
@@ -39,9 +43,13 @@
    - 明确 fee/slippage/chain 的口径与单位（bps）
    - 对 `expected_edge_after_costs_bps` 增加审计日志，避免“过度扣减”误伤
    - 给 research 模式提供可回放的参数扫描（阈值网格）
-3. **真实 LLM 接入替代 mock**（并保证失败降级）
-4. **真实执行闭环**（下单/查单/撤单/状态归一）
-5. **真实风险与对账输入**（去掉占位值，接真实仓位与成交）
+3. **Go/No-Go 判定增强（避免“0信号也GO”）**
+   - 新增最小信号产出门槛（例如最近 N 个周期 `signals_generated >= X`）
+   - 新增最小有效样本门槛（edge 分布、成本后 edge 正占比）
+   - 将“流程健康”与“交易有效”拆分为双 verdict
+4. **真实 LLM 接入替代 mock**（并保证失败降级）
+5. **真实执行闭环**（下单/查单/撤单/状态归一）
+6. **真实风险与对账输入**（去掉占位值，接真实仓位与成交）
 
 ---
 
