@@ -71,6 +71,10 @@ class ChamiClawApp:
                 signal_drop_counts={},
             )
 
+        cycle_started = time.time()
+        timing_ms: dict[str, int] = {}
+        llm_degraded_signals = 0
+
         try:
             markets = scan_markets(self.config, self.gamma)
         except Exception as exc:
@@ -91,6 +95,8 @@ class ChamiClawApp:
                 orders_submitted=0,
                 signal_drop_counts={},
             )
+        timing_ms["scan"] = int((time.time() - cycle_started) * 1000)
+
         quotes_written = 0
         signals_generated = 0
         orders_submitted = 0
@@ -99,11 +105,11 @@ class ChamiClawApp:
         orderbook_budget = int(self.config.get("scan", {}).get("max_orderbook_calls_per_cycle", 40))
         orderbook_for_tradable_only = bool(self.config.get("scan", {}).get("orderbook_for_tradable_only", True))
         enable_orderbook = bool(self.config.get("scan", {}).get("enable_orderbook", True))
-        cycle_started = time.time()
         max_cycle_sec = float(self.config.get("scan", {}).get("max_cycle_runtime_sec", 120))
         quote_by_market_id: dict[str, dict[str, Any]] = {}
 
         # Phase 1: ingest all market snapshots + quotes first, so peer-market context is complete.
+        phase1_started = time.time()
         for market in markets:
             if time.time() - cycle_started > max_cycle_sec:
                 self.db.insert_audit_event(
@@ -138,7 +144,10 @@ class ChamiClawApp:
             quote_by_market_id[market["market_id"]] = quote
             quotes_written += 1
 
+        timing_ms["quote_phase"] = int((time.time() - phase1_started) * 1000)
+
         # Phase 2: signal generation + risk + execution.
+        phase2_started = time.time()
         for market in markets:
             if time.time() - cycle_started > max_cycle_sec:
                 self.db.insert_audit_event(
@@ -196,6 +205,9 @@ class ChamiClawApp:
                     },
                 )
                 continue
+
+            if bool(signal.get("model_degraded", False)):
+                llm_degraded_signals += 1
 
             self.db.insert_signal(signal)
             for pred in signal.get("predictions", []):
@@ -302,7 +314,35 @@ class ChamiClawApp:
             for row in paper_rows:
                 self.db.insert_paper_result(row)
 
-        self.state.transition("RUNNING", "cycle_completed")
+        timing_ms["signal_execution_phase"] = int((time.time() - phase2_started) * 1000)
+        timing_ms["total"] = int((time.time() - cycle_started) * 1000)
+
+        llm_pause_threshold = int(self.config.get("ops", {}).get("llm_degrade_pause_threshold", 999999))
+        if llm_degraded_signals >= llm_pause_threshold:
+            self.state.transition("PAUSED", "llm_degraded_threshold")
+            self.db.insert_audit_event(
+                level="WARN",
+                category="ops",
+                code="LLM_DEGRADED_THRESHOLD_PAUSE",
+                message="paused due to excessive degraded-model signals in one cycle",
+                context={"llm_degraded_signals": llm_degraded_signals, "threshold": llm_pause_threshold},
+            )
+            self._alert(
+                "WARN",
+                "Paused: LLM degraded threshold reached",
+                "Too many degraded-model signals in one cycle",
+                context={"llm_degraded_signals": llm_degraded_signals, "threshold": llm_pause_threshold},
+            )
+        else:
+            self.state.transition("RUNNING", "cycle_completed")
+
+        self.db.insert_audit_event(
+            level="INFO",
+            category="pipeline",
+            code="RUN_ONCE_TIMING",
+            message="run_once_timing",
+            context={"timing_ms": timing_ms, "llm_degraded_signals": llm_degraded_signals},
+        )
 
         return PipelineResult(
             scanned_markets=len(markets),

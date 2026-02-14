@@ -78,7 +78,8 @@
     "api_key_env": "CHAMICLAW_LLM_API_KEY"
   },
   "ops": {
-    "discord_webhook": ""
+    "discord_webhook": "",
+    "llm_degrade_pause_threshold": 5
   },
   "reconcile": {
     "interval_sec": 300,
