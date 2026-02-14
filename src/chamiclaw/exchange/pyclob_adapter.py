@@ -148,3 +148,32 @@ class PyClobAdapter:
             order_id = f"pyclob-{abs(hash(str(out))) % (10**12)}"
 
         return PyClobOrderResult(order_id=order_id, status=status, raw=out)
+
+    def smoke_check(self) -> dict[str, Any]:
+        creds = self._ensure_api_creds()
+        client = self._build_client(with_creds=True)
+
+        api_keys_count = None
+        if hasattr(client, "get_api_keys"):
+            try:
+                keys = _run_maybe_async(client.get_api_keys())
+                if isinstance(keys, list):
+                    api_keys_count = len(keys)
+                elif isinstance(keys, dict):
+                    api_keys_count = len(keys.get("keys", [])) if isinstance(keys.get("keys"), list) else 1
+                else:
+                    api_keys_count = 1
+            except Exception:
+                api_keys_count = None
+
+        return {
+            "ok": True,
+            "host": self.host,
+            "chain_id": self.chain_id,
+            "has_private_key": bool(self.private_key),
+            "has_api_key": bool(creds.get("api_key")),
+            "has_api_secret": bool(creds.get("secret")),
+            "has_api_passphrase": bool(creds.get("passphrase")),
+            "api_creds_cache_path": str(self.cache_path),
+            "api_keys_count": api_keys_count,
+        }

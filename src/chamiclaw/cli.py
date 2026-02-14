@@ -23,6 +23,7 @@ from chamiclaw.ops.go_no_go_validation import (
     run_llm_fallback_probe,
 )
 from chamiclaw.ops.deploy_readiness import build_deploy_readiness_report
+from chamiclaw.exchange.pyclob_adapter import PyClobAdapter, PyClobAdapterError
 from chamiclaw.reconcile.engine import ReconcileEngine
 from chamiclaw.settings import load_settings
 from chamiclaw.utils.json_logger import JsonLogger
@@ -403,6 +404,16 @@ def cmd_deploy_readiness(config: str, output: str) -> None:
     print(json.dumps({"output_path": output, "deploy_ready": report["deploy_ready"], "failures": report["failures"]}, ensure_ascii=True))
 
 
+def cmd_clob_smoke(config: str) -> None:
+    cfg, _, _ = _build_app(config)
+    try:
+        adapter = PyClobAdapter(cfg)
+        out = adapter.smoke_check()
+        print(json.dumps(out, ensure_ascii=True))
+    except PyClobAdapterError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=True))
+
+
 def cmd_drill(scenario: str, apply_state: bool) -> None:
     if scenario == "all":
         rows = run_all_drills(apply_state=apply_state)
@@ -459,6 +470,7 @@ def build_parser() -> argparse.ArgumentParser:
             "alert-test",
             "live-readiness",
             "deploy-readiness",
+            "clob-smoke",
             "drill",
         ],
     )
@@ -540,6 +552,8 @@ def main() -> None:
         cmd_live_readiness(args.config)
     elif cmd == "deploy-readiness":
         cmd_deploy_readiness(args.config, args.output)
+    elif cmd == "clob-smoke":
+        cmd_clob_smoke(args.config)
     elif cmd == "drill":
         cmd_drill(args.scenario, args.apply_state)
 

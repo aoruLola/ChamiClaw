@@ -54,6 +54,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - `alert-test`
 - `live-readiness`
 - `deploy-readiness`
+- `clob-smoke`
 - `drill` (failure drill: `api-failure|reconcile-mismatch|drawdown-limit`, default dry-run)
 
 ## Notes
