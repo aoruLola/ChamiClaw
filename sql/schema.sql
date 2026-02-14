@@ -135,3 +135,15 @@ CREATE TABLE IF NOT EXISTS paper_results (
   FOREIGN KEY (signal_id) REFERENCES signals(signal_id),
   FOREIGN KEY (market_id) REFERENCES markets(market_id)
 );
+
+
+CREATE TABLE IF NOT EXISTS mm_pnl_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  market_id TEXT NOT NULL,
+  side TEXT NOT NULL,
+  final_state TEXT NOT NULL,
+  pnl_class TEXT NOT NULL,
+  created_at_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mm_pnl_market_time ON mm_pnl_events (market_id, created_at_utc);

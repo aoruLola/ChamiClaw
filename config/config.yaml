@@ -17,48 +17,53 @@ apis:
   clob_field_map: {}
 
 scan:
-  interval_sec: 60
-  min_liquidity_usd: 100000
-  min_depth_usd: 20000
+  interval_sec: 20
+  min_liquidity_usd: 120000
+  min_depth_usd: 25000
   min_time_to_expiry_min: 180
   max_time_to_expiry_days: 30
-  max_markets_per_scan: 200
-  max_cycle_runtime_sec: 120
+  max_markets_per_scan: 180
+  max_cycle_runtime_sec: 20
   enable_orderbook: true
-  orderbook_for_tradable_only: true
-  max_orderbook_calls_per_cycle: 40
+  orderbook_for_tradable_only: false
+  max_orderbook_calls_per_cycle: 35
   orderbook_path_template: /book?market={market_id}
   orderbook_timeout_sec: 6
 
 signal:
-  enter_edge_bps: 250
-  llm_enter_edge_bps: 80
-  min_llm_enter_edge_bps: 20
-  research_relaxation_bps: 40
+  require_structural_signal: true
+  disable_llm_only_entry: true
+  enforce_structural_min_edge_bps: 280
+  enforce_min_edge_after_cost_bps: 120
+  enter_edge_bps: 180
+  llm_enter_edge_bps: 200
+  min_llm_enter_edge_bps: 150
+  research_relaxation_bps: 0
   live_llm_enter_edge_bps: 40
-  exit_edge_bps: 80
-  no_trade_zone_bps: 120
-  min_confidence: 0.62
+  exit_edge_bps: 120
+  no_trade_zone_bps: 110
+  min_confidence: 0.65
   min_confidence_floor: 0.5
-  research_confidence_relax: 0.07
-  live_min_confidence: 0.55
+  research_confidence_relax: 0
+  live_min_confidence: 0.60
   trading_fee_pct: 0.02
   slippage_bps: 40
-  assumed_order_notional_usd: 100
+  assumed_order_notional_usd: 80
   chain_cost_bps: 0
+  net_edge_cost_mode: fixed_200_40_plus_half_spread
   enable_cross_market_signal: true
-  cross_market_gap_bps: 150
+  cross_market_gap_bps: 140
   enable_term_structure_signal: true
   term_structure_gap_bps: 120
-  structural_conflict_gap_bps: 80
+  structural_conflict_gap_bps: 160
 
 risk:
   account_equity_usd: 10000
-  per_market_pos_pct: 0.015
-  event_cluster_exposure_pct: 0.10
+  per_market_pos_pct: 0.02
+  event_cluster_exposure_pct: 0.15
   daily_max_drawdown_pct: 0.04
-  max_spread_bps: 120
-  pre_expiry_add_position_block_min: 120
+  max_spread_bps: 320
+  pre_expiry_add_position_block_min: 180
   max_open_orders_per_market: 1
 
 execution:
@@ -66,29 +71,44 @@ execution:
   signature_type: 0
   api_creds_cache_path: data/polymarket_api_creds.json
   limit_order_only: true
-  order_timeout_sec: 45
-  poll_interval_sec: 3
+  order_timeout_sec: 15
+  poll_interval_sec: 2
   request_timeout_sec: 10
-  min_reprice_interval_sec: 20
-  max_retries: 3
+  min_reprice_interval_sec: 4
+  max_retries: 1
   dry_run: true
 
 llm:
-  mode: mock
+  single_llm_mode: true
+  mode: http
   request_timeout_sec: 8
-  max_retries: 2
-  llm1_endpoint: ""
+  max_retries: 1
+  llm1_endpoint: "https://api.siliconflow.cn/v1/chat/completions"
   llm2_endpoint: ""
-  llm1_model: ""
-  llm2_model: ""
+  llm1_model: "deepseek-ai/DeepSeek-V3.2"
+  llm2_model: "deepseek-ai/DeepSeek-V3.2"
   api_key_env: CHAMICLAW_LLM_API_KEY
 
 ops:
   discord_webhook: ""
   llm_degrade_pause_threshold: 5
 
+market_making:
+  enabled: true
+  baseline_mode: true
+  min_spread_bps: 40
+  min_market_liquidity_usd: 100000
+  inventory_threshold_pct: 0.02
+  per_market_exposure_pct: 0.06
+  total_exposure_pct: 0.30
+  pause_after_consecutive_losses: 2
+  pause_minutes: 30
+  mm_cooldown_sec: 60
+  mid_move_pause_bps: 150
+  use_llm_fair_prob: true
+
 reconcile:
-  interval_sec: 300
+  interval_sec: 200
   exchange_positions_endpoint: ""
   qty_tolerance: 0.0001
   pause_mismatch_threshold: 1

@@ -48,12 +48,27 @@ def scan_markets(config: dict[str, Any], client: GammaClient) -> list[dict[str, 
         )
 
         market_id = str(raw.get("id") or raw.get("conditionId") or "")
+        condition_id = str(raw.get("conditionId") or raw.get("condition_id") or market_id)
         if not market_id:
             continue
+
+        token_ids = [str(x) for x in token_ids if str(x)]
+        token_id_yes = ""
+        token_id_no = ""
+        if len(token_ids) >= 1:
+            token_id_yes = str(token_ids[0])
+        if len(token_ids) >= 2:
+            token_id_no = str(token_ids[1])
+        raw_yes = str(raw.get("yesTokenId") or raw.get("yes_token_id") or "")
+        raw_no = str(raw.get("noTokenId") or raw.get("no_token_id") or "")
+        if raw_yes and raw_no and (not token_ids or (raw_yes in token_ids and raw_no in token_ids)):
+            token_id_yes = raw_yes
+            token_id_no = raw_no
 
         scanned.append(
             {
                 "market_id": market_id,
+                "condition_id": condition_id,
                 "event_id": str(raw.get("eventId") or ""),
                 "slug": raw.get("slug"),
                 "question": raw.get("question") or "",
@@ -67,6 +82,8 @@ def scan_markets(config: dict[str, Any], client: GammaClient) -> list[dict[str, 
                 "outcomes": outcomes,
                 "outcome_prices": prices,
                 "clob_token_ids": token_ids,
+                "token_id_yes": token_id_yes,
+                "token_id_no": token_id_no,
                 "updated_at_utc": utc_now_iso(),
             }
         )

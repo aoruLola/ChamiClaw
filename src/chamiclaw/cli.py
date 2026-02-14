@@ -27,6 +27,9 @@ from chamiclaw.exchange.pyclob_adapter import PyClobAdapter, PyClobAdapterError
 from chamiclaw.reconcile.engine import ReconcileEngine
 from chamiclaw.settings import load_settings
 from chamiclaw.utils.json_logger import JsonLogger
+from chamiclaw.scanner.market_scanner import scan_markets
+from chamiclaw.scanner.clob_client import CLOBClient
+from chamiclaw.scanner.gamma_client import GammaClient
 
 
 def _build_app(config_path: str) -> tuple[dict, Database, ChamiClawApp]:
@@ -60,12 +63,61 @@ def cmd_run_once(config: str) -> None:
             "signal_drop_counts": result.signal_drop_counts,
         },
     )
+    if result.signal_drop_counts.get("DATA_INSUFFICIENT_MISSING_BBO", 0) > 0:
+        with db.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT context_json FROM audit_events
+                WHERE category='scanner' AND code='BBO_INSUFFICIENT'
+                ORDER BY ts_utc DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        ctx = json.loads(row[0] or "{}") if row else {}
+        print(
+            json.dumps(
+                {
+                    "scanned_markets": result.scanned_markets,
+                    "bbo_markets": result.bbo_markets,
+                    "missing_counts": ctx.get("missing_counts", {}),
+                    "last_orderbook_errors": ctx.get("last_orderbook_errors", []),
+                    "sample_raw_payload_keys": ctx.get("sample_raw_payload_keys", {}),
+                },
+                ensure_ascii=True,
+            )
+        )
+        return
+
     print(json.dumps(
         {
             "scanned_markets": result.scanned_markets,
             "quotes_written": result.quotes_written,
             "signals_generated": result.signals_generated,
             "orders_submitted": result.orders_submitted,
+            "bbo_markets": result.bbo_markets,
+            "max_raw_edge_bps": result.max_raw_edge_bps,
+            "min_spread_bps": result.min_spread_bps,
+            "structural_signal_counts": result.structural_signal_counts,
+            "top_edge_market_debug": result.top_edge_market_debug,
+            "edge_calc_attempted": result.edge_calc_attempted,
+            "edge_calc_success": result.edge_calc_success,
+            "edge_calc_failed": result.edge_calc_failed,
+            "edge_calc_skipped": result.edge_calc_skipped,
+            "edge_calc_errors": result.edge_calc_errors,
+            "p50_edge_bps": result.p50_edge_bps,
+            "p90_edge_bps": result.p90_edge_bps,
+            "p99_edge_bps": result.p99_edge_bps,
+            "max_edge_bps": result.max_edge_bps,
+            "top3_edges": result.top3_edges,
+            "baseline_mode": result.baseline_mode,
+            "active_mm_markets": result.active_mm_markets,
+            "active_arbitrage_markets": result.active_arbitrage_markets,
+            "inventory_snapshot": result.inventory_snapshot,
+            "mm_stage_executed": result.mm_stage_executed,
+            "mm_candidates_count": result.mm_candidates_count,
+            "mm_selected_count": result.mm_selected_count,
+            "mm_reject_counts": result.mm_reject_counts,
+            "mm_sample_rejects": result.mm_sample_rejects,
             "dry_run": cfg["execution"].get("dry_run", True),
             "signal_drop_counts": result.signal_drop_counts,
         },
@@ -185,6 +237,44 @@ def cmd_state() -> None:
     sm = SystemStateMachine()
     s = sm.load()
     print(json.dumps({"state": s.state, "reason": s.reason, "updated_at_utc": s.updated_at_utc}, ensure_ascii=True))
+
+
+def cmd_dump_bbo(config: str, n: int) -> None:
+    cfg, _, _ = _build_app(config)
+    gamma = GammaClient(cfg["apis"]["gamma_base"])
+    clob = CLOBClient(cfg["apis"].get("clob_base", ""), config=cfg)
+    markets = scan_markets(cfg, gamma)[: max(1, int(n))]
+    out = []
+    for m in markets:
+        token_id_yes = str(m.get("token_id_yes") or "")
+        token_id_no = str(m.get("token_id_no") or "")
+        parsed_bbo, diag = clob.fetch_top_of_book_debug(
+            market_id=m["market_id"],
+            token_id_yes=token_id_yes,
+            token_id_no=token_id_no,
+            timeout_sec=float(cfg.get("scan", {}).get("orderbook_timeout_sec", 6)),
+        )
+        out.append(
+            {
+                "market_id": m["market_id"],
+                "condition_id": m.get("condition_id"),
+                "token_id_yes": token_id_yes,
+                "token_id_no": token_id_no,
+                "payload_keys": {
+                    "yes": diag.get("yes_payload_keys", []),
+                    "no": diag.get("no_payload_keys", []),
+                },
+                "parsed_bbo": {
+                    "yes_best_bid": None if parsed_bbo is None else parsed_bbo.get("yes_bid"),
+                    "yes_best_ask": None if parsed_bbo is None else parsed_bbo.get("yes_ask"),
+                    "no_best_bid": None if parsed_bbo is None else parsed_bbo.get("no_bid"),
+                    "no_best_ask": None if parsed_bbo is None else parsed_bbo.get("no_ask"),
+                },
+                "error": diag.get("error"),
+                "probe_url": diag.get("probe_url"),
+            }
+        )
+    print(json.dumps(out, ensure_ascii=True))
 
 
 def cmd_llm_fallback_check(config: str, iterations: int) -> None:
@@ -472,6 +562,7 @@ def build_parser() -> argparse.ArgumentParser:
             "deploy-readiness",
             "clob-smoke",
             "drill",
+            "dump-bbo",
         ],
     )
     p.add_argument("--config", default="config/config.yaml", help="Path to config YAML/JSON")
@@ -498,6 +589,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--confidence-grid", default="0.55,0.62,0.70", help="Comma-separated min_confidence grid for threshold-grid")
     p.add_argument("--market-limit", default=200, type=int, help="Max tradable markets for threshold-grid")
     p.add_argument("--threshold-grid-output", default="reports/threshold_grid.json", help="Output path for threshold-grid report")
+    p.add_argument("--n", default=3, type=int, help="Sample size for dump-bbo")
     return p
 
 
@@ -556,6 +648,8 @@ def main() -> None:
         cmd_clob_smoke(args.config)
     elif cmd == "drill":
         cmd_drill(args.scenario, args.apply_state)
+    elif cmd == "dump-bbo":
+        cmd_dump_bbo(args.config, args.n)
 
 
 if __name__ == "__main__":

@@ -39,7 +39,7 @@ class RiskEngine:
         if order_intent.get("position_pct", 0) > risk["per_market_pos_pct"]:
             return RiskDecision(
                 False,
-                "POS_LIMIT",
+                "PER_MARKET_LIMIT",
                 "per-market position limit exceeded",
                 details={"actual": float(order_intent.get("position_pct", 0)), "threshold": float(risk["per_market_pos_pct"])},
             )
@@ -47,7 +47,7 @@ class RiskEngine:
         if order_intent.get("cluster_exposure_pct", 0) > risk["event_cluster_exposure_pct"]:
             return RiskDecision(
                 False,
-                "CLUSTER_LIMIT",
+                "CLUSTER_EXPOSURE_LIMIT",
                 "event cluster exposure exceeded",
                 details={"actual": float(order_intent.get("cluster_exposure_pct", 0)), "threshold": float(risk["event_cluster_exposure_pct"])},
             )
@@ -60,7 +60,7 @@ class RiskEngine:
                 if mins_left < risk["pre_expiry_add_position_block_min"] and order_intent.get("is_add_position", True):
                     return RiskDecision(
                         False,
-                        "PRE_EXPIRY_BLOCK",
+                        "EXPIRY_BLOCK",
                         "cannot add close to expiry",
                         details={"actual": mins_left, "threshold": float(risk["pre_expiry_add_position_block_min"])},
                     )
@@ -70,7 +70,7 @@ class RiskEngine:
         if order_intent.get("daily_drawdown_pct", 0) >= risk["daily_max_drawdown_pct"]:
             return RiskDecision(
                 False,
-                "DAILY_DD",
+                "DRAWDOWN_LIMIT",
                 "daily max drawdown reached",
                 details={"actual": float(order_intent.get("daily_drawdown_pct", 0)), "threshold": float(risk["daily_max_drawdown_pct"])},
             )

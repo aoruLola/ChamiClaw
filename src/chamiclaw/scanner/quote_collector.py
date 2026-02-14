@@ -27,7 +27,11 @@ def build_quote(
         no_bid = float(orderbook.get("no_bid", no_price))
         no_ask = float(orderbook.get("no_ask", no_price))
         depth_usd = float(orderbook.get("depth_usd", 0.0))
-        spread_bps = max(0.0, (yes_ask - yes_bid) * 10_000)
+        yes_mid_local = (yes_bid + yes_ask) / 2.0
+        no_mid_local = (no_bid + no_ask) / 2.0
+        yes_rel = 0.0 if yes_ask <= yes_bid else ((yes_ask - yes_bid) / max(1e-9, yes_mid_local)) * 10_000
+        no_rel = 0.0 if no_ask <= no_bid else ((no_ask - no_bid) / max(1e-9, no_mid_local)) * 10_000
+        spread_bps = (yes_rel + no_rel) / 2.0 if (yes_rel > 0 or no_rel > 0) else 0.0
         source = "clob_orderbook"
     else:
         spread_bps = _synthetic_spread_bps(yes_price)
@@ -46,6 +50,9 @@ def build_quote(
     if yes_price + no_price > 0:
         imbalance = (yes_price - no_price) / max(1e-9, yes_price + no_price)
 
+    yes_mid = (yes_bid + yes_ask) / 2.0
+    no_mid = (no_bid + no_ask) / 2.0
+
     return {
         "market_id": market["market_id"],
         "ts_utc": utc_now_iso(),
@@ -53,8 +60,8 @@ def build_quote(
         "yes_ask": yes_ask,
         "no_bid": no_bid,
         "no_ask": no_ask,
-        "yes_mid": yes_price,
-        "no_mid": no_price,
+        "yes_mid": yes_mid,
+        "no_mid": no_mid,
         "spread_bps": spread_bps,
         "depth_usd": depth_usd,
         "depth_imbalance": imbalance,

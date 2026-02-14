@@ -105,7 +105,7 @@ class ExecutionEngine:
                     if submit_attempts < max_retries:
                         time.sleep(min(2.0, 0.2 * (2**submit_attempts)))
             if submit is None:
-                return OrderResult(order_id=final_order_id, status="rejected", reason="submit_failed", retries=total_retries)
+                return OrderResult(order_id=final_order_id, status="rejected", reason="PRICE_MOVED", retries=total_retries)
 
             parsed = parse_order_response(submit, field_map=self.order_field_map)
             order_id = parsed["order_id"] or payload["client_order_id"]
@@ -124,7 +124,7 @@ class ExecutionEngine:
                 status = "canceled"
 
             if cycle >= max_retries:
-                return OrderResult(order_id=order_id, status=status, reason="timeout_cancel", retries=total_retries)
+                return OrderResult(order_id=order_id, status=status, reason="ORDER_TIMEOUT", retries=total_retries)
             now = time.time()
             wait = max(0.0, min_reprice_interval - (now - last_reprice_ts))
             if wait > 0:
@@ -132,7 +132,7 @@ class ExecutionEngine:
             last_reprice_ts = time.time()
             working_price = self._adjust_price(side=side, price=working_price, tick_size=tick_size)
 
-        return OrderResult(order_id=final_order_id, status="canceled", reason="retry_exhausted", retries=total_retries)
+        return OrderResult(order_id=final_order_id, status="canceled", reason="REPRICE_LIMIT", retries=total_retries)
 
     def _live_precheck_failures(self) -> list[str]:
         failures: list[str] = []
@@ -181,6 +181,25 @@ class ExecutionEngine:
                 return OrderResult(order_id=str(uuid.uuid4()), status="rejected", reason=f"pyclob_unexpected:{exc}", retries=0)
 
         return self._place_live_order(signal=signal, limit_price=limit_price, quantity=quantity)
+
+
+    def cancel_order(self, order_id: str) -> OrderResult:
+        if self.execution_cfg.get("dry_run", True):
+            return OrderResult(order_id=order_id, status="canceled", reason="dry_run_cancel", retries=0)
+        failures = self._live_precheck_failures()
+        if failures:
+            return OrderResult(order_id=order_id, status="rejected", reason="live_precheck_failed:" + ",".join(failures), retries=0)
+        try:
+            cancel_resp = self._request_json("POST", self.endpoints.cancel_order.format(order_id=order_id), payload={})
+            status = normalize_order_status(str(cancel_resp.get("status", "canceled")))
+            return OrderResult(order_id=order_id, status=status, reason="cancel_request", retries=0)
+        except Exception as exc:
+            return OrderResult(order_id=order_id, status="rejected", reason=f"cancel_failed:{exc}", retries=0)
+
+    def execute_order(self, signal: dict, quote: dict) -> tuple[OrderResult, bool]:
+        limit_price, quantity = self.build_order(signal=signal, quote=quote)
+        res = self.place_limit_order(signal=signal, limit_price=limit_price, quantity=quantity)
+        return res, True
 
     def build_order_intent(self, signal: dict, quote: dict, market: dict, risk_snapshot: dict | None = None) -> dict:
         snapshot = risk_snapshot or {}

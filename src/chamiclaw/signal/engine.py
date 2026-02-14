@@ -6,6 +6,7 @@ from typing import Any
 from chamiclaw.llm.interfaces import Llm1Generator, Llm2Validator, LlmProviderError
 from chamiclaw.signal.costs import estimate_cost_bps
 from chamiclaw.signal.structural import (
+    calc_pair_cost_edge_bps,
     detect_cross_market_signal,
     detect_pair_cost_signal,
     detect_term_structure_signal,
@@ -29,35 +30,63 @@ class SignalEngine:
         quote: dict[str, Any],
         strategy_version: str = "v0",
         peer_markets: list[dict[str, Any]] | None = None,
+        peer_quotes_by_market_id: dict[str, dict[str, Any]] | None = None,
         debug: dict[str, Any] | None = None,
+        enable_cross_market_signal: bool = True,
+        enable_term_structure_signal: bool = True,
     ) -> dict[str, Any] | None:
         yes_mid = float(quote["yes_mid"])
         no_mid = float(quote["no_mid"])
         market_prob = yes_mid
 
         peers = peer_markets or []
+        peer_quotes_map = peer_quotes_by_market_id or {}
         structural_candidates = []
-        pair = detect_pair_cost_signal(yes_mid, no_mid, self.config["signal"]["trading_fee_pct"])
-        if pair is not None:
+        pair_calc = calc_pair_cost_edge_bps(
+            quote.get("yes_bid"),
+            quote.get("yes_ask"),
+            quote.get("no_bid"),
+            quote.get("no_ask"),
+        )
+        pair = detect_pair_cost_signal(
+            quote.get("yes_bid"),
+            quote.get("yes_ask"),
+            quote.get("no_bid"),
+            quote.get("no_ask"),
+            float(self.config["signal"].get("enter_edge_bps", 180)),
+        )
+        pair_hit = pair is not None
+        if pair_hit:
             structural_candidates.append(pair)
-        if self.config["signal"].get("enable_cross_market_signal", True):
+        cross_hit = False
+        if enable_cross_market_signal and self.config["signal"].get("enable_cross_market_signal", True):
+            peer_quotes = [peer_quotes_map.get(str(p.get("market_id"))) for p in peers if peer_quotes_map.get(str(p.get("market_id"))) is not None]
             cross = detect_cross_market_signal(
                 market=market,
                 quote=quote,
-                peer_markets=peers,
+                peer_quotes=peer_quotes,
                 gap_bps_threshold=float(self.config["signal"].get("cross_market_gap_bps", 150)),
             )
-            if cross is not None:
+            cross_hit = cross is not None
+            if cross_hit:
                 structural_candidates.append(cross)
-        if self.config["signal"].get("enable_term_structure_signal", True):
+        term_hit = False
+        if enable_term_structure_signal and self.config["signal"].get("enable_term_structure_signal", True):
             term = detect_term_structure_signal(
                 market=market,
                 quote=quote,
                 peer_markets=peers,
+                peer_quotes_by_market_id=peer_quotes_map,
                 inversion_bps_threshold=float(self.config["signal"].get("term_structure_gap_bps", 120)),
             )
-            if term is not None:
+            term_hit = term is not None
+            if term_hit:
                 structural_candidates.append(term)
+        if debug is not None:
+            debug["pair_cost_hit"] = pair_hit
+            debug["cross_market_hit"] = cross_hit
+            debug["term_structure_hit"] = term_hit
+            debug["pair_calc"] = pair_calc
 
         structural = None
         if structural_candidates:
@@ -78,6 +107,7 @@ class SignalEngine:
         model_degraded = False
         llm2 = None
         llm_error = ""
+        single_llm_mode = bool(self.config.get("llm", {}).get("single_llm_mode", False))
         try:
             llm1 = self.llm1.infer(
                 market_prob=market_prob,
@@ -95,20 +125,23 @@ class SignalEngine:
                     "risk_tags": llm1.risk_tags,
                 }
             )
-            llm2 = self.llm2.validate(
-                market_prob=market_prob,
-                fair_prob=llm1.fair_prob,
-                features={"spread_bps": quote.get("spread_bps", 0)},
-            )
-            predictions.append(
-                {
-                    "model_name": "llm2",
-                    "fair_prob": llm2.fair_prob,
-                    "confidence": llm2.confidence,
-                    "rationale": llm2.rationale,
-                    "risk_tags": llm2.risk_tags,
-                }
-            )
+            if single_llm_mode:
+                llm2 = llm1
+            else:
+                llm2 = self.llm2.validate(
+                    market_prob=market_prob,
+                    fair_prob=llm1.fair_prob,
+                    features={"spread_bps": quote.get("spread_bps", 0)},
+                )
+                predictions.append(
+                    {
+                        "model_name": "llm2",
+                        "fair_prob": llm2.fair_prob,
+                        "confidence": llm2.confidence,
+                        "rationale": llm2.rationale,
+                        "risk_tags": llm2.risk_tags,
+                    }
+                )
         except (LlmProviderError, RuntimeError, ValueError, KeyError, TypeError) as exc:
             model_degraded = True
             llm_error = str(exc)
@@ -132,63 +165,66 @@ class SignalEngine:
         if structural is not None:
             edge_bps_raw = float(structural.edge_bps)
         costs = estimate_cost_bps(self.config, quote)
-        expected_edge_after_costs_bps = edge_bps_raw - costs.total_bps
+        spread_bps = float(quote.get("spread_bps", 0.0))
+        expected_edge_after_costs_bps = edge_bps_raw - 200.0 - 40.0 - (spread_bps / 2.0)
 
         signal_cfg = self.config.get("signal", {})
-        is_dry_run = bool(self.config.get("execution", {}).get("dry_run", True))
+        min_confidence = float(signal_cfg.get("live_min_confidence", signal_cfg.get("min_confidence", 0.60)))
+        confidence = min(p["confidence"] for p in predictions if p["confidence"] is not None)
 
-        if is_dry_run:
-            llm_enter_threshold_bps = float(signal_cfg.get("llm_enter_edge_bps", signal_cfg.get("enter_edge_bps", 80)))
-            relax_bps = float(signal_cfg.get("research_relaxation_bps", 0))
-            min_floor_bps = float(signal_cfg.get("min_llm_enter_edge_bps", 20))
-            if relax_bps > 0:
-                llm_enter_threshold_bps = max(min_floor_bps, llm_enter_threshold_bps - relax_bps)
-        else:
-            llm_enter_threshold_bps = float(
-                signal_cfg.get(
-                    "live_llm_enter_edge_bps",
-                    signal_cfg.get("llm_enter_edge_bps", signal_cfg.get("enter_edge_bps", 80)),
-                )
-            )
-
-        if structural is None and llm2 is not None and expected_edge_after_costs_bps < llm_enter_threshold_bps:
-            drop_reason = "EDGE_BELOW_ENTER_THRESHOLD"
-            drop_category = "edge"
-            if edge_bps_raw < llm_enter_threshold_bps:
-                drop_reason = "RAW_EDGE_BELOW_THRESHOLD"
-            elif costs.total_bps > 0:
-                drop_reason = "EDGE_AFTER_COST_BELOW_THRESHOLD"
-                drop_category = "cost"
+        if structural is None:
             if debug is not None:
-                debug["drop_reason"] = drop_reason
-                debug["drop_category"] = drop_category
+                has_bbo = all(quote.get(k) is not None for k in ("yes_bid", "yes_ask", "no_bid", "no_ask"))
+                if not has_bbo:
+                    reason = "DATA_INSUFFICIENT_MISSING_BBO"
+                elif not bool(debug.get("pair_cost_hit", False)):
+                    reason = "PAIR_COST_NOT_MET"
+                elif len(peers) == 0:
+                    reason = "DATA_INSUFFICIENT_CROSS"
+                elif not bool(debug.get("cross_market_hit", False)):
+                    reason = "CROSS_MARKET_NOT_MET"
+                elif market.get("end_time_utc") is None:
+                    reason = "DATA_INSUFFICIENT_TERM"
+                elif not bool(debug.get("term_structure_hit", False)):
+                    reason = "TERM_STRUCTURE_NOT_MET"
+                else:
+                    reason = "NO_STRUCTURAL_SIGNAL"
+                debug["drop_reason"] = reason
+                debug["drop_category"] = "policy"
                 debug["raw_edge_bps"] = edge_bps_raw
                 debug["expected_edge_after_costs_bps"] = expected_edge_after_costs_bps
-                debug["threshold_bps"] = llm_enter_threshold_bps
-                debug["cost_breakdown"] = {
-                    "fee_bps": costs.fee_bps,
-                    "slippage_bps": costs.slippage_bps,
-                    "chain_bps": costs.chain_bps,
-                    "total_bps": costs.total_bps,
-                }
             return None
 
-        confidence = min(p["confidence"] for p in predictions if p["confidence"] is not None)
-        if is_dry_run:
-            min_confidence = float(signal_cfg.get("min_confidence", 0.62))
-            conf_relax = float(signal_cfg.get("research_confidence_relax", 0.0))
-            conf_floor = float(signal_cfg.get("min_confidence_floor", 0.50))
-            if conf_relax > 0:
-                min_confidence = max(conf_floor, min_confidence - conf_relax)
-        else:
-            min_confidence = float(signal_cfg.get("live_min_confidence", signal_cfg.get("min_confidence", 0.62)))
-
-        if structural is None and confidence < min_confidence:
+        if float(edge_bps_raw) < float(signal_cfg.get("enter_edge_bps", 280)):
             if debug is not None:
-                debug["drop_reason"] = "LOW_CONFIDENCE"
+                debug["drop_reason"] = "RAW_EDGE_BELOW_THRESHOLD"
+                debug["drop_category"] = "edge"
+                debug["raw_edge_bps"] = edge_bps_raw
+                debug["threshold_bps"] = float(signal_cfg.get("enter_edge_bps", 280))
+            return None
+
+        if expected_edge_after_costs_bps < 120:
+            if debug is not None:
+                debug["drop_reason"] = "NET_EDGE_TOO_LOW"
+                debug["drop_category"] = "cost"
+                debug["expected_edge_after_costs_bps"] = expected_edge_after_costs_bps
+                debug["threshold_bps"] = 120
+            return None
+
+        if spread_bps > 280:
+            if debug is not None:
+                debug["drop_reason"] = "SPREAD_TOO_WIDE"
+                debug["drop_category"] = "risk"
+                debug["spread_bps"] = spread_bps
+                debug["threshold_bps"] = 280
+            return None
+
+        if confidence < 0.60:
+            if debug is not None:
+                debug["drop_reason"] = "LLM_CONFIDENCE_LOW"
                 debug["drop_category"] = "confidence"
                 debug["confidence"] = confidence
-                debug["min_confidence"] = min_confidence
+                debug["min_confidence"] = 0.60
             return None
 
         signal_type = structural.signal_type if structural else "llm_edge"
@@ -220,10 +256,10 @@ class SignalEngine:
             "status": "generated",
             "created_at_utc": created_at,
             "cost_breakdown": {
-                "fee_bps": costs.fee_bps,
-                "slippage_bps": costs.slippage_bps,
-                "chain_bps": costs.chain_bps,
-                "total_bps": costs.total_bps,
+                "fee_bps": 200.0,
+                "slippage_bps": 40.0,
+                "chain_bps": float(spread_bps / 2.0),
+                "total_bps": float(200.0 + 40.0 + (spread_bps / 2.0)),
             },
             "predictions": predictions,
             "model_degraded": model_degraded,

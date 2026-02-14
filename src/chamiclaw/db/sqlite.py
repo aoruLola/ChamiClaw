@@ -14,6 +14,21 @@ class Database:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_runtime_schema()
+
+    def _ensure_runtime_schema(self) -> None:
+        with self.connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS mm_pnl_events (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  idempotency_key TEXT NOT NULL UNIQUE,
+                  market_id TEXT NOT NULL,
+                  side TEXT NOT NULL,
+                  final_state TEXT NOT NULL,
+                  pnl_class TEXT NOT NULL,
+                  created_at_utc TEXT NOT NULL
+                )
+            """)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -250,6 +265,21 @@ class Database:
                 """,
                 (utc_now_iso(), level, category, code, message, json.dumps(context or {}, ensure_ascii=True)),
             )
+
+
+    def insert_mm_pnl_event(self, idempotency_key: str, market_id: str, side: str, final_state: str, pnl_class: str) -> bool:
+        with self.connect() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO mm_pnl_events (idempotency_key, market_id, side, final_state, pnl_class, created_at_utc)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (idempotency_key, market_id, side, final_state, pnl_class, utc_now_iso()),
+                )
+                return True
+            except sqlite3.IntegrityError:
+                return False
 
     def build_risk_snapshot(
         self,

@@ -116,52 +116,89 @@ def _level_price_size(level: Any, price_aliases: list[str], size_aliases: list[s
 
 def parse_orderbook_response(payload: Any, field_map: dict[str, Any] | None = None) -> dict[str, float] | None:
     book = unwrap_payload(payload)
-    if isinstance(book, dict):
-        container_aliases = _aliases(field_map, "container", ["book"])
-        nested = _first_value(book, container_aliases, None)
-        if isinstance(nested, dict):
-            book = nested
     if not isinstance(book, dict):
         return None
 
-    yes_bid_aliases = _aliases(field_map, "yes_bids", ["yes_bids", "bids"])
-    yes_ask_aliases = _aliases(field_map, "yes_asks", ["yes_asks", "asks"])
-    no_bid_aliases = _aliases(field_map, "no_bids", ["no_bids"])
-    no_ask_aliases = _aliases(field_map, "no_asks", ["no_asks"])
+    def _first_num(obj: dict[str, Any], keys: list[str]) -> float | None:
+        for k in keys:
+            if k in obj:
+                try:
+                    return float(obj.get(k))
+                except (TypeError, ValueError):
+                    pass
+        return None
+
+    # direct BBO aliases
+    yes_bid = _first_num(book, ["yes_best_bid", "yesBid", "yes_bid", "best_yes_bid"])
+    yes_ask = _first_num(book, ["yes_best_ask", "yesAsk", "yes_ask", "best_yes_ask"])
+    no_bid = _first_num(book, ["no_best_bid", "noBid", "no_bid", "best_no_bid"])
+    no_ask = _first_num(book, ["no_best_ask", "noAsk", "no_ask", "best_no_ask"])
+
     price_aliases = _aliases(field_map, "price", ["price", "px"])
     size_aliases = _aliases(field_map, "size", ["size", "quantity", "qty"])
 
-    yes_bids = _extract_levels(book, yes_bid_aliases)
-    yes_asks = _extract_levels(book, yes_ask_aliases)
-    no_bids = _extract_levels(book, no_bid_aliases)
-    no_asks = _extract_levels(book, no_ask_aliases)
-
-    def _best_bid(levels: list[dict[str, Any]]) -> float:
-        if not levels:
-            return 0.0
-        vals = [_level_price_size(x, price_aliases, size_aliases)[0] for x in levels]
-        return max(vals) if vals else 0.0
-
-    def _best_ask(levels: list[dict[str, Any]]) -> float:
+    def _best_bid(levels: list[Any]) -> float | None:
         vals = [_level_price_size(x, price_aliases, size_aliases)[0] for x in levels]
         vals = [v for v in vals if v > 0]
-        return min(vals) if vals else 0.0
+        return max(vals) if vals else None
 
-    def _depth(levels: list[dict[str, Any]], cap_levels: int = 5) -> float:
+    def _best_ask(levels: list[Any]) -> float | None:
+        vals = [_level_price_size(x, price_aliases, size_aliases)[0] for x in levels]
+        vals = [v for v in vals if v > 0]
+        return min(vals) if vals else None
+
+    def _depth(levels: list[Any], cap_levels: int = 5) -> float:
         total = 0.0
         for lv in levels[:cap_levels]:
-            price, size = _level_price_size(lv, price_aliases, size_aliases)
-            total += price * size
+            p, q = _level_price_size(lv, price_aliases, size_aliases)
+            total += p * q
         return total
 
-    yes_bid = _best_bid(yes_bids)
-    yes_ask = _best_ask(yes_asks)
-    no_bid = _best_bid(no_bids) if no_bids else max(0.0, 1.0 - yes_ask)
-    no_ask = _best_ask(no_asks) if no_asks else max(0.0, 1.0 - yes_bid)
+    # container compatibility
+    yes_book = book.get("yesBook") or book.get("yes_book") or {}
+    no_book = book.get("noBook") or book.get("no_book") or {}
+    orderbook = book.get("orderbook") or book.get("book") or book
+
+    yes_bids = _extract_levels(yes_book if isinstance(yes_book, dict) else {}, ["bids"]) or _extract_levels(orderbook if isinstance(orderbook, dict) else {}, ["yes_bids", "bids"])
+    yes_asks = _extract_levels(yes_book if isinstance(yes_book, dict) else {}, ["asks"]) or _extract_levels(orderbook if isinstance(orderbook, dict) else {}, ["yes_asks", "asks"])
+    no_bids = _extract_levels(no_book if isinstance(no_book, dict) else {}, ["bids"]) or _extract_levels(orderbook if isinstance(orderbook, dict) else {}, ["no_bids"])
+    no_asks = _extract_levels(no_book if isinstance(no_book, dict) else {}, ["asks"]) or _extract_levels(orderbook if isinstance(orderbook, dict) else {}, ["no_asks"])
+
+    if yes_bid is None:
+        yes_bid = _best_bid(yes_bids)
+    if yes_ask is None:
+        yes_ask = _best_ask(yes_asks)
+    if no_bid is None:
+        no_bid = _best_bid(no_bids)
+    if no_ask is None:
+        no_ask = _best_ask(no_asks)
+
+    # token-level orderbook compatibility: if only bids/asks are present, treat them as yes side
+    if yes_bid is None and yes_bids:
+        yes_bid = _best_bid(yes_bids)
+    if yes_ask is None and yes_asks:
+        yes_ask = _best_ask(yes_asks)
+
+    if yes_bid is None or yes_ask is None:
+        last_px = _first_num(book, ["last_trade_price", "lastPrice", "last_price"])
+        if last_px is not None:
+            if yes_bid is None:
+                yes_bid = last_px
+            if yes_ask is None:
+                yes_ask = last_px
+
+    if yes_bid is None or yes_ask is None:
+        return None
+
+    if no_bid is None:
+        no_bid = yes_bid
+    if no_ask is None:
+        no_ask = yes_ask
+
     return {
-        "yes_bid": yes_bid,
-        "yes_ask": yes_ask,
-        "no_bid": no_bid,
-        "no_ask": no_ask,
-        "depth_usd": _depth(yes_bids) + _depth(yes_asks),
+        "yes_bid": float(yes_bid),
+        "yes_ask": float(yes_ask),
+        "no_bid": float(no_bid),
+        "no_ask": float(no_ask),
+        "depth_usd": _depth(yes_bids) + _depth(yes_asks) + _depth(no_bids) + _depth(no_asks),
     }
