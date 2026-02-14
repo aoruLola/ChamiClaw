@@ -46,6 +46,19 @@ class ChamiClawApp:
             return
         post_discord_alert(webhook_url=webhook, level=level, title=title, detail=detail, context=context or {})
 
+    def _is_close_only_action(self, signal: dict[str, Any], risk_snapshot: dict[str, Any]) -> bool:
+        side = str(signal.get("side", ""))
+        yes_qty = float(risk_snapshot.get("yes_qty", 0.0) or 0.0)
+        no_qty = float(risk_snapshot.get("no_qty", 0.0) or 0.0)
+
+        # With current buy-only executor, we approximate close-only as reducing net directional imbalance
+        # by buying the opposite side against an existing position.
+        if side == "buy_no" and yes_qty > no_qty:
+            return True
+        if side == "buy_yes" and no_qty > yes_qty:
+            return True
+        return False
+
     def run_once(self) -> PipelineResult:
         state = self.state.load()
         if state.state == "HALTED":
@@ -200,6 +213,28 @@ class ChamiClawApp:
                 quote=quote,
                 account_equity_usd=float(self.config.get("risk", {}).get("account_equity_usd", 10_000)),
             )
+
+            if bool(signal.get("model_degraded", False)):
+                if not self._is_close_only_action(signal, risk_snapshot):
+                    self.db.insert_audit_event(
+                        level="WARN",
+                        category="execution",
+                        code="LLM_DEGRADED_OPEN_BLOCKED",
+                        message="LLM unavailable/degraded; only close-only actions are allowed",
+                        context={
+                            "signal_id": signal["signal_id"],
+                            "side": signal.get("side"),
+                            "yes_qty": risk_snapshot.get("yes_qty", 0.0),
+                            "no_qty": risk_snapshot.get("no_qty", 0.0),
+                        },
+                    )
+                    self.logger.log(
+                        "LLM_DEGRADED_OPEN_BLOCKED",
+                        signal_id=signal["signal_id"],
+                        side=signal.get("side"),
+                    )
+                    continue
+
             intent = self.execution.build_order_intent(signal=signal, quote=quote, market=market, risk_snapshot=risk_snapshot)
             decision = self.risk.check(intent)
             if not decision.approved:

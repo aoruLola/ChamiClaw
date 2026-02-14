@@ -334,6 +334,8 @@ class Database:
             "market_notional_usd": market_notional,
             "cluster_notional_usd": cluster_notional,
             "daily_realized_pnl_usd": daily_pnl,
+            "yes_qty": yes_qty,
+            "no_qty": no_qty,
         }
 
     def get_peer_markets(self, market_id: str, event_id: str | None, limit: int = 20) -> list[dict[str, Any]]:
