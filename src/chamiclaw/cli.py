@@ -387,6 +387,70 @@ def cmd_alert_test(message: str, level: str) -> None:
     print(json.dumps({"ok": res.ok, "status": res.status, "detail": res.detail}, ensure_ascii=True))
 
 
+def cmd_live_readiness(config: str) -> None:
+    cfg, db, _ = _build_app(config)
+    snapshot = db.get_go_no_go_snapshot()
+    policy = dict(cfg.get("go_no_go", {}) or {})
+    gng = build_go_no_go_payload(snapshot, policy=policy)
+
+    failures: list[str] = []
+    warnings: list[str] = []
+
+    execution_cfg = cfg.get("execution", {})
+    llm_cfg = cfg.get("llm", {})
+    apis_cfg = cfg.get("apis", {})
+    reconcile_cfg = cfg.get("reconcile", {})
+
+    if bool(execution_cfg.get("dry_run", True)):
+        failures.append("execution.dry_run=true")
+
+    if str(llm_cfg.get("mode", "mock")).strip().lower() != "http":
+        failures.append("llm.mode!=http")
+
+    if not str(llm_cfg.get("llm1_endpoint", "")).strip():
+        failures.append("llm1_endpoint_missing")
+    if not str(llm_cfg.get("llm2_endpoint", "")).strip():
+        failures.append("llm2_endpoint_missing")
+
+    if not str(apis_cfg.get("clob_base", "")).strip():
+        failures.append("apis.clob_base_missing")
+
+    if not str(reconcile_cfg.get("exchange_positions_endpoint", "")).strip():
+        warnings.append("reconcile.exchange_positions_endpoint_missing")
+
+    role = get_secret_access_snapshot().role
+    if role != "execution":
+        failures.append("runtime_role_not_execution")
+
+    if not os.getenv("CLOB_API_KEY", "").strip():
+        failures.append("env.CLOB_API_KEY_missing")
+
+    llm_api_env = str(llm_cfg.get("api_key_env", "CHAMICLAW_LLM_API_KEY"))
+    if not os.getenv(llm_api_env, "").strip():
+        warnings.append(f"env.{llm_api_env}_missing")
+
+    if gng.get("verdict") != "GO":
+        failures.append("go_no_go_verdict_not_go")
+
+    live_ready = len(failures) == 0
+    print(
+        json.dumps(
+            {
+                "live_ready": live_ready,
+                "failures": failures,
+                "warnings": warnings,
+                "go_no_go": {
+                    "verdict": gng.get("verdict"),
+                    "flow_verdict": gng.get("flow_verdict"),
+                    "trading_verdict": gng.get("trading_verdict"),
+                    "blockers": gng.get("blockers", []),
+                },
+            },
+            ensure_ascii=True,
+        )
+    )
+
+
 def cmd_drill(scenario: str, apply_state: bool) -> None:
     if scenario == "all":
         rows = run_all_drills(apply_state=apply_state)
@@ -441,6 +505,7 @@ def build_parser() -> argparse.ArgumentParser:
             "backtest",
             "report",
             "alert-test",
+            "live-readiness",
             "drill",
         ],
     )
@@ -518,6 +583,8 @@ def main() -> None:
         cmd_report(args.config)
     elif cmd == "alert-test":
         cmd_alert_test(args.message, args.level)
+    elif cmd == "live-readiness":
+        cmd_live_readiness(args.config)
     elif cmd == "drill":
         cmd_drill(args.scenario, args.apply_state)
 

@@ -32,6 +32,7 @@
   - `RAW_EDGE_BELOW_THRESHOLD=7`
 - 已完成一版 reachability 修复：research 模式阈值放松（仅 dry-run 生效），信号由 0 提升到可产出（稳定 2 条/轮左右）。
 - Go/No-Go 已升级并通过最新验证（在研究策略门槛下）：`final_verdict=GO`。
+- 新增 `live-readiness` 预检命令，用于阻断“研究模式 GO 误判为可实盘”。
 - 结论：当前主要阻塞在 **edge 与阈值/成本口径**，并非单纯风控或执行失败。
 - 结论：目前仍适合“数据与研究验证”，不适合直接实盘。
 
