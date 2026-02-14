@@ -88,7 +88,9 @@ class ChamiClawApp:
         enable_orderbook = bool(self.config.get("scan", {}).get("enable_orderbook", True))
         cycle_started = time.time()
         max_cycle_sec = float(self.config.get("scan", {}).get("max_cycle_runtime_sec", 120))
+        quote_by_market_id: dict[str, dict[str, Any]] = {}
 
+        # Phase 1: ingest all market snapshots + quotes first, so peer-market context is complete.
         for market in markets:
             if time.time() - cycle_started > max_cycle_sec:
                 self.db.insert_audit_event(
@@ -120,8 +122,14 @@ class ChamiClawApp:
                 orderbook_calls += 1
             quote = build_quote(market, recent_yes, orderbook=orderbook)
             self.db.insert_quote(quote)
+            quote_by_market_id[market["market_id"]] = quote
             quotes_written += 1
 
+        # Phase 2: signal generation + risk + execution.
+        for market in markets:
+            quote = quote_by_market_id.get(market["market_id"])
+            if quote is None:
+                continue
             if not market["tradable"]:
                 continue
 
@@ -140,6 +148,24 @@ class ChamiClawApp:
             if not signal:
                 reason = str(debug.get("drop_reason") or "UNKNOWN")
                 signal_drop_counts[reason] = signal_drop_counts.get(reason, 0) + 1
+                self.db.insert_audit_event(
+                    level="INFO",
+                    category="signal",
+                    code="SIGNAL_DROP",
+                    message=reason,
+                    context={
+                        "market_id": market["market_id"],
+                        "event_id": market.get("event_id"),
+                        "drop_reason": reason,
+                        "drop_category": debug.get("drop_category"),
+                        "raw_edge_bps": debug.get("raw_edge_bps"),
+                        "expected_edge_after_costs_bps": debug.get("expected_edge_after_costs_bps"),
+                        "threshold_bps": debug.get("threshold_bps"),
+                        "confidence": debug.get("confidence"),
+                        "cost_breakdown": debug.get("cost_breakdown"),
+                        "model_degraded": debug.get("model_degraded"),
+                    },
+                )
                 continue
 
             self.db.insert_signal(signal)

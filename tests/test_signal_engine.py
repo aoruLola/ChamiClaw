@@ -148,7 +148,8 @@ class SignalEngineTest(unittest.TestCase):
             debug=debug,
         )
         self.assertIsNone(signal)
-        self.assertEqual(debug.get("drop_reason"), "EDGE_BELOW_ENTER_THRESHOLD")
+        self.assertEqual(debug.get("drop_reason"), "RAW_EDGE_BELOW_THRESHOLD")
+        self.assertEqual(debug.get("drop_category"), "edge")
 
 
 if __name__ == "__main__":

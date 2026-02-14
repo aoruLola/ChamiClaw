@@ -69,6 +69,7 @@ class SignalEngine:
                 if top.side != second.side and abs(float(top.edge_bps) - float(second.edge_bps)) <= conflict_gap_bps:
                     if debug is not None:
                         debug["drop_reason"] = "STRUCTURAL_CONFLICT"
+                        debug["drop_category"] = "conflict"
                         debug["top_signal"] = top.signal_type
                         debug["second_signal"] = second.signal_type
                     return None
@@ -124,6 +125,7 @@ class SignalEngine:
         if llm2 is None and structural is None:
             if debug is not None:
                 debug["drop_reason"] = "NO_STRUCTURAL_AND_LLM_UNAVAILABLE"
+                debug["drop_category"] = "availability"
             return None
 
         edge_bps_raw = (llm2.fair_prob - market_prob) * 10_000 if llm2 is not None else 0.0
@@ -136,16 +138,32 @@ class SignalEngine:
             self.config["signal"].get("llm_enter_edge_bps", self.config["signal"]["enter_edge_bps"])
         )
         if structural is None and llm2 is not None and expected_edge_after_costs_bps < llm_enter_threshold_bps:
+            drop_reason = "EDGE_BELOW_ENTER_THRESHOLD"
+            drop_category = "edge"
+            if edge_bps_raw < llm_enter_threshold_bps:
+                drop_reason = "RAW_EDGE_BELOW_THRESHOLD"
+            elif costs.total_bps > 0:
+                drop_reason = "EDGE_AFTER_COST_BELOW_THRESHOLD"
+                drop_category = "cost"
             if debug is not None:
-                debug["drop_reason"] = "EDGE_BELOW_ENTER_THRESHOLD"
+                debug["drop_reason"] = drop_reason
+                debug["drop_category"] = drop_category
+                debug["raw_edge_bps"] = edge_bps_raw
                 debug["expected_edge_after_costs_bps"] = expected_edge_after_costs_bps
                 debug["threshold_bps"] = llm_enter_threshold_bps
+                debug["cost_breakdown"] = {
+                    "fee_bps": costs.fee_bps,
+                    "slippage_bps": costs.slippage_bps,
+                    "chain_bps": costs.chain_bps,
+                    "total_bps": costs.total_bps,
+                }
             return None
 
         confidence = min(p["confidence"] for p in predictions if p["confidence"] is not None)
         if structural is None and confidence < self.config["signal"]["min_confidence"]:
             if debug is not None:
                 debug["drop_reason"] = "LOW_CONFIDENCE"
+                debug["drop_category"] = "confidence"
                 debug["confidence"] = confidence
             return None
 

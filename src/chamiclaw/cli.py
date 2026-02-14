@@ -11,6 +11,7 @@ from chamiclaw.db.sqlite import Database
 from chamiclaw.evaluate.backtest import run_simple_backtest
 from chamiclaw.evaluate.calibration import bucket_calibration, calibrate_predictions
 from chamiclaw.evaluate.report import write_daily_report
+from chamiclaw.evaluate.threshold_grid import parse_float_grid, run_threshold_grid_scan
 from chamiclaw.ops.alerting import post_discord_alert
 from chamiclaw.ops.secrets import get_secret_access_snapshot
 from chamiclaw.ops.state_machine import SystemStateMachine
@@ -227,6 +228,36 @@ def cmd_validate_go_no_go(
     )
 
 
+def cmd_threshold_grid(
+    config: str,
+    enter_grid: str,
+    confidence_grid: str,
+    market_limit: int,
+    output_path: str,
+) -> None:
+    cfg, db, _ = _build_app(config)
+    result = run_threshold_grid_scan(
+        config=cfg,
+        db=db,
+        llm_enter_grid=parse_float_grid(enter_grid),
+        min_conf_grid=parse_float_grid(confidence_grid),
+        market_limit=market_limit,
+    )
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(result, ensure_ascii=True, indent=2), encoding="utf-8")
+    print(
+        json.dumps(
+            {
+                "output_path": output_path,
+                "market_count": result["market_count"],
+                "rows": len(result["rows"]),
+            },
+            ensure_ascii=True,
+        )
+    )
+
+
 def cmd_backtest(config: str) -> None:
     cfg, db, _ = _build_app(config)
     with db.connect() as conn:
@@ -404,6 +435,7 @@ def build_parser() -> argparse.ArgumentParser:
             "llm-fallback-check",
             "go-no-go",
             "validate-go-no-go",
+            "threshold-grid",
             "backtest",
             "report",
             "alert-test",
@@ -430,6 +462,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fallback-iterations", default=50, type=int, help="Fallback probe iterations for validate-go-no-go")
     p.add_argument("--require-go-streak", default=3, type=int, help="Required GO streak for validate-go-no-go")
     p.add_argument("--output", default="reports/go_no_go_validation.json", help="Output path for validate-go-no-go report")
+    p.add_argument("--enter-grid", default="80,120,200", help="Comma-separated llm_enter_edge_bps grid for threshold-grid")
+    p.add_argument("--confidence-grid", default="0.55,0.62,0.70", help="Comma-separated min_confidence grid for threshold-grid")
+    p.add_argument("--market-limit", default=200, type=int, help="Max tradable markets for threshold-grid")
+    p.add_argument("--threshold-grid-output", default="reports/threshold_grid.json", help="Output path for threshold-grid report")
     return p
 
 
@@ -465,6 +501,14 @@ def main() -> None:
             args.fallback_iterations,
             args.require_go_streak,
             args.output,
+        )
+    elif cmd == "threshold-grid":
+        cmd_threshold_grid(
+            args.config,
+            args.enter_grid,
+            args.confidence_grid,
+            args.market_limit,
+            args.threshold_grid_output,
         )
     elif cmd == "backtest":
         cmd_backtest(args.config)

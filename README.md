@@ -50,6 +50,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - `llm-fallback-check`
 - `go-no-go`
 - `validate-go-no-go`
+- `threshold-grid`
 - `alert-test`
 - `drill` (failure drill: `api-failure|reconcile-mismatch|drawdown-limit`, default dry-run)
 
@@ -65,6 +66,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - On LLM failure, strategy degrades to structural signals only (if available).
 - Cost model uses `fee + depth-adjusted slippage + chain_cost_bps` and enforces edge-after-cost checks before model-only entries.
 - LLM-only entries use `signal.llm_enter_edge_bps` (default `80`) as the model-entry threshold; if unset, it falls back to `signal.enter_edge_bps`.
+- Signal drop diagnostics now include category + edge/cost details in audit events (`category='signal'`, `code='SIGNAL_DROP'`).
 - Structural signal set now includes:
   - `pair_cost_arb`
   - `cross_market_divergence` (same event peer markets)
@@ -83,6 +85,9 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - Integrated Go/No-Go validation command:
   - `chamiclaw validate-go-no-go --config config/config.yaml --cycles 20 --reconcile-every 5 --fallback-iterations 50 --require-go-streak 3`
   - writes `reports/go_no_go_validation.json` with per-cycle run/reconcile/go-no-go evidence and final blockers.
+- Threshold grid scan command (research mode):
+  - `chamiclaw threshold-grid --config config/config.yaml --enter-grid 80,120,200 --confidence-grid 0.55,0.62,0.70 --market-limit 200`
+  - writes `reports/threshold_grid.json` for threshold replay and drop-reason breakdown.
 - LLM fallback pressure check command:
   - `chamiclaw llm-fallback-check --config config/config.yaml --iterations 50`
   - verifies structural fallback keeps producing signals when LLM is forced to fail.
