@@ -1,0 +1,99 @@
+{
+  "skill": {
+    "slug": "polymarket-analysis",
+    "displayName": "Polymarket Analysis",
+    "summary": "Analyze Polymarket prediction markets for trading edges. Pair Cost arbitrage, whale tracking, sentiment analysis, momentum signals, user profile tracking. No execution.",
+    "tags": {
+      "latest": "2.1.0"
+    },
+    "stats": {
+      "comments": 0,
+      "downloads": 1034,
+      "installsAllTime": 4,
+      "installsCurrent": 4,
+      "stars": 5,
+      "versions": 2
+    },
+    "createdAt": 1769595358296,
+    "updatedAt": 1771003157553
+  },
+  "latestVersion": {
+    "version": "2.1.0",
+    "createdAt": 1769662255777,
+    "changelog": "Add Data API for user profiles, positions, trades, P&L tracking"
+  },
+  "owner": {
+    "handle": "hiehoo",
+    "userId": "kn7909bxjdmn331b0wrd1zya157zyj2n",
+    "displayName": "hiehoo",
+    "image": "https://avatars.githubusercontent.com/u/67284748?v=4"
+  },
+  "version": {
+    "version": "2.1.0",
+    "createdAt": 1769662255777,
+    "changelog": "Add Data API for user profiles, positions, trades, P&L tracking",
+    "changelogSource": "user",
+    "files": [
+      {
+        "path": "SKILL.md",
+        "size": 2541,
+        "sha256": "4cde4e150c35b76692736df248ca2479246971b76b6315138b517957f0f9875b",
+        "contentType": "text/markdown"
+      },
+      {
+        "path": "references/market-monitoring-setup.md",
+        "size": 3523,
+        "sha256": "c44bf688e981a21287fb8d11d57b346e57e13b12a53bd004763a9819945522ae",
+        "contentType": "text/markdown"
+      },
+      {
+        "path": "references/momentum-analysis.md",
+        "size": 2106,
+        "sha256": "069b81b43e1c4f093d8c0b5ded71466202998d127010c3ea6db2da1d5b550f32",
+        "contentType": "text/markdown"
+      },
+      {
+        "path": "references/pair-cost-arbitrage.md",
+        "size": 1965,
+        "sha256": "86fa30dca098f085495ea5cd3ccb1babe603887d99675b114a3c6cf23e5a6436",
+        "contentType": "text/markdown"
+      },
+      {
+        "path": "references/polymarket-api.md",
+        "size": 2168,
+        "sha256": "e4f96c5847b8884f4b8010b8b4ca0308419eb10138ab623f68f47c0a56ad03cb",
+        "contentType": "text/markdown"
+      },
+      {
+        "path": "references/sentiment-analysis.md",
+        "size": 2359,
+        "sha256": "b99160810aa643283bfb8cca8fcc875fd372cabfb687c541afff8ee0c01fa448",
+        "contentType": "text/markdown"
+      },
+      {
+        "path": "references/whale-tracking.md",
+        "size": 2138,
+        "sha256": "f8bd31974a54d0aa069d1df9d9fea8111f1a91edf98a946b1dec4eedf52ac211",
+        "contentType": "text/markdown"
+      },
+      {
+        "path": "scripts/fetch-polymarket-user-profile.py",
+        "size": 3262,
+        "sha256": "60b8637be6f57acdf558d2788c5fe3d4c8c23f9641871eef5ba4b76e122aaa96",
+        "contentType": "text/plain"
+      },
+      {
+        "path": "scripts/monitor-polymarket-market.py",
+        "size": 8787,
+        "sha256": "6916125af7e8e063894054ed644143d5486dad6833fde83257e0cc13f7b25dc9",
+        "contentType": "text/plain"
+      },
+      {
+        "path": "state/1068346.json",
+        "size": 331,
+        "sha256": "1d589b5138ecacae8cf1925be31040e2a67751b0419c4e3c51bafee0d7772be1",
+        "contentType": "application/json"
+      }
+    ]
+  }
+}

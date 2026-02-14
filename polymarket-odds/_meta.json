@@ -1,0 +1,51 @@
+{
+  "skill": {
+    "slug": "polymarket-odds",
+    "displayName": "Polymarket Odds",
+    "summary": "Query Polymarket prediction market odds and events via CLI. Search for markets, get current prices, list events by category. Supports sports betting (NFL, NBA, soccer/EPL, Champions League), politics, crypto, elections, geopolitics. Real money markets = more accurate than polls. No API key required. Use when asked about odds, probabilities, predictions, or \"what are the chances of X\".",
+    "tags": {
+      "latest": "1.0.0"
+    },
+    "stats": {
+      "comments": 0,
+      "downloads": 1221,
+      "installsAllTime": 4,
+      "installsCurrent": 4,
+      "stars": 5,
+      "versions": 1
+    },
+    "createdAt": 1769364207598,
+    "updatedAt": 1771003329386
+  },
+  "latestVersion": {
+    "version": "1.0.0",
+    "createdAt": 1769364207598,
+    "changelog": "Initial release - prediction market odds CLI for sports, politics, crypto"
+  },
+  "owner": {
+    "handle": "deanpress",
+    "userId": "kn73vt6y69bfa21fmmwc7qrrrn7zwjxw",
+    "displayName": "deanpress",
+    "image": "https://avatars.githubusercontent.com/u/31391056?v=4"
+  },
+  "version": {
+    "version": "1.0.0",
+    "createdAt": 1769364207598,
+    "changelog": "Initial release - prediction market odds CLI for sports, politics, crypto",
+    "changelogSource": "user",
+    "files": [
+      {
+        "path": "SKILL.md",
+        "size": 3075,
+        "sha256": "50af19ee6453e0224679c78a66ce04ef78ec668d0f3d0d0dae7c814f4f5d68fc",
+        "contentType": "text/markdown"
+      },
+      {
+        "path": "polymarket.mjs",
+        "size": 8363,
+        "sha256": "abdbc1644ca8d65f01116ecda0c5bb0ef887705c41dbfc73f92e99bd34d9be89",
+        "contentType": "text/javascript"
+      }
+    ]
+  }
+}

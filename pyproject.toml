@@ -1,0 +1,20 @@
+[project]
+name = "chamiclaw"
+version = "0.1.0"
+description = "Automated Polymarket trading system"
+readme = "SYSTEM_DESIGN.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+chamiclaw = "chamiclaw.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
