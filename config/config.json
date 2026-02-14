@@ -63,6 +63,7 @@
   "execution": {
     "backend": "py-clob-client",
     "signature_type": 0,
+    "api_creds_cache_path": "data/polymarket_api_creds.json",
     "limit_order_only": true,
     "order_timeout_sec": 45,
     "poll_interval_sec": 3,

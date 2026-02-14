@@ -142,12 +142,6 @@ class ExecutionEngine:
         if self.backend == "py-clob-client":
             if not os.getenv("POLYMARKET_PRIVATE_KEY", "").strip():
                 failures.append("POLYMARKET_PRIVATE_KEY_missing")
-            if not os.getenv("POLYMARKET_API_KEY", "").strip():
-                failures.append("POLYMARKET_API_KEY_missing")
-            if not os.getenv("POLYMARKET_API_SECRET", "").strip():
-                failures.append("POLYMARKET_API_SECRET_missing")
-            if not os.getenv("POLYMARKET_API_PASSPHRASE", "").strip():
-                failures.append("POLYMARKET_API_PASSPHRASE_missing")
             if not self.base_url:
                 failures.append("clob_base_missing")
             return failures

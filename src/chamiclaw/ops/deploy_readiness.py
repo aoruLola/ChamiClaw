@@ -97,12 +97,12 @@ def build_deploy_readiness_report(config: dict[str, Any], go_no_go_snapshot: dic
     if backend == "py-clob-client":
         if not os.getenv("POLYMARKET_PRIVATE_KEY", "").strip():
             failures.append("env.POLYMARKET_PRIVATE_KEY_missing")
-        if not os.getenv("POLYMARKET_API_KEY", "").strip():
-            failures.append("env.POLYMARKET_API_KEY_missing")
-        if not os.getenv("POLYMARKET_API_SECRET", "").strip():
-            failures.append("env.POLYMARKET_API_SECRET_missing")
-        if not os.getenv("POLYMARKET_API_PASSPHRASE", "").strip():
-            failures.append("env.POLYMARKET_API_PASSPHRASE_missing")
+        if not (
+            os.getenv("POLYMARKET_API_KEY", "").strip()
+            and os.getenv("POLYMARKET_API_SECRET", "").strip()
+            and os.getenv("POLYMARKET_API_PASSPHRASE", "").strip()
+        ):
+            warnings.append("env.POLYMARKET_API_KEY/SECRET/PASSPHRASE_missing_will_auto_derive")
     else:
         if not os.getenv("CLOB_API_KEY", "").strip():
             failures.append("env.CLOB_API_KEY_missing")

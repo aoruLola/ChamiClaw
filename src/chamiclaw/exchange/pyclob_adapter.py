@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -38,6 +40,8 @@ class PyClobAdapter:
         self.api_key = str(os.getenv("POLYMARKET_API_KEY", "")).strip()
         self.api_secret = str(os.getenv("POLYMARKET_API_SECRET", "")).strip()
         self.api_passphrase = str(os.getenv("POLYMARKET_API_PASSPHRASE", "")).strip()
+        cache_path = str(config.get("execution", {}).get("api_creds_cache_path", "data/polymarket_api_creds.json"))
+        self.cache_path = Path(cache_path)
 
         try:
             from py_clob_client.client import ClobClient  # type: ignore
@@ -46,18 +50,53 @@ class PyClobAdapter:
 
         self._ClobClient = ClobClient
 
+    def _load_cached_creds(self) -> dict[str, str] | None:
+        if not self.cache_path.exists():
+            return None
+        try:
+            data = json.loads(self.cache_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        api_key = str(data.get("api_key") or "").strip()
+        secret = str(data.get("secret") or "").strip()
+        passphrase = str(data.get("passphrase") or "").strip()
+        if api_key and secret and passphrase:
+            return {"api_key": api_key, "secret": secret, "passphrase": passphrase}
+        return None
+
+    def _save_cached_creds(self, creds: dict[str, str]) -> None:
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self.cache_path.write_text(json.dumps(creds, ensure_ascii=True, indent=2), encoding="utf-8")
+
+    def _ensure_api_creds(self) -> dict[str, str]:
+        if self.api_key and self.api_secret and self.api_passphrase:
+            return {"api_key": self.api_key, "secret": self.api_secret, "passphrase": self.api_passphrase}
+
+        cached = self._load_cached_creds()
+        if cached:
+            self.api_key, self.api_secret, self.api_passphrase = cached["api_key"], cached["secret"], cached["passphrase"]
+            return cached
+
+        derived = self.create_or_derive_api_creds()
+        api_key = str(derived.get("apiKey") or derived.get("api_key") or "").strip()
+        secret = str(derived.get("secret") or "").strip()
+        passphrase = str(derived.get("passphrase") or "").strip()
+        if not (api_key and secret and passphrase):
+            raise PyClobAdapterError("unable to derive complete api creds")
+
+        creds = {"api_key": api_key, "secret": secret, "passphrase": passphrase}
+        self.api_key, self.api_secret, self.api_passphrase = api_key, secret, passphrase
+        self._save_cached_creds(creds)
+        return creds
+
     def _build_client(self, with_creds: bool):
         if not self.private_key:
             raise PyClobAdapterError("POLYMARKET_PRIVATE_KEY missing")
 
         if with_creds:
-            if not (self.api_key and self.api_secret and self.api_passphrase):
-                raise PyClobAdapterError("POLYMARKET_API_KEY/API_SECRET/API_PASSPHRASE missing")
-            creds = {
-                "api_key": self.api_key,
-                "secret": self.api_secret,
-                "passphrase": self.api_passphrase,
-            }
+            creds = self._ensure_api_creds()
             return self._ClobClient(
                 host=self.host,
                 chain_id=self.chain_id,
