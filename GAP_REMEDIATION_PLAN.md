@@ -34,6 +34,8 @@
 - Go/No-Go 已升级并通过最新验证（在研究策略门槛下）：`final_verdict=GO`。
 - 新增 `live-readiness` 预检命令，用于阻断“研究模式 GO 误判为可实盘”。
 - 执行层新增 live precheck 拦截：若缺 `CLOB_API_KEY` / 非 `execution` 角色 / 端点不完整，将拒单而不是盲目尝试实盘请求。
+- 新增循环预算保护（signal/execution 阶段）以减少 watchdog SIGKILL 风险。
+- 最新联调现状：硅基流动接口可达，但账户余额不足导致 LLM 返回 30001（进而出现 `NO_STRUCTURAL_AND_LLM_UNAVAILABLE` 掉落）。
 - 结论：当前主要阻塞在 **edge 与阈值/成本口径**，并非单纯风控或执行失败。
 - 结论：目前仍适合“数据与研究验证”，不适合直接实盘。
 

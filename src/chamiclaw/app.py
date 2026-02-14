@@ -127,6 +127,22 @@ class ChamiClawApp:
 
         # Phase 2: signal generation + risk + execution.
         for market in markets:
+            if time.time() - cycle_started > max_cycle_sec:
+                self.db.insert_audit_event(
+                    level="WARN",
+                    category="signal",
+                    code="CYCLE_TIME_BUDGET_EXCEEDED_SIGNAL_PHASE",
+                    message="signal/execution phase stopped by time budget",
+                    context={"max_cycle_runtime_sec": max_cycle_sec, "signals_generated": signals_generated},
+                )
+                self._alert(
+                    "WARN",
+                    "Cycle runtime budget exceeded (signal phase)",
+                    "signal/execution phase exited early to avoid watchdog kill",
+                    context={"max_cycle_runtime_sec": max_cycle_sec, "signals_generated": signals_generated},
+                )
+                break
+
             quote = quote_by_market_id.get(market["market_id"])
             if quote is None:
                 continue
