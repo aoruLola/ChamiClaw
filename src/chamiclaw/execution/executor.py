@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from chamiclaw.exchange.endpoints import load_clob_endpoints
+from chamiclaw.exchange.endpoints import load_clob_endpoints, load_clob_field_map
 from chamiclaw.exchange.normalize import normalize_order_status, parse_order_response
 from chamiclaw.utils.time import utc_now_iso
 
@@ -27,6 +27,7 @@ class ExecutionEngine:
         self.execution_cfg = config.get("execution", {})
         self.base_url = str(config.get("apis", {}).get("clob_base", "")).rstrip("/")
         self.endpoints = load_clob_endpoints(config)
+        self.order_field_map = dict(load_clob_field_map(config).get("order", {}) or {})
 
     def _request_json(self, method: str, path: str, payload: dict | None = None) -> dict:
         if not self.base_url:
@@ -59,7 +60,7 @@ class ExecutionEngine:
             time.sleep(max(0.2, poll_interval_sec))
             try:
                 status_resp = self._request_json("GET", self.endpoints.order_status.format(order_id=order_id))
-                parsed = parse_order_response(status_resp)
+                parsed = parse_order_response(status_resp, field_map=self.order_field_map)
                 status = parsed["status"] or status
             except (HTTPError, URLError, TimeoutError, OSError, ValueError, RuntimeError):
                 continue
@@ -103,7 +104,7 @@ class ExecutionEngine:
             if submit is None:
                 return OrderResult(order_id=final_order_id, status="rejected", reason="submit_failed", retries=total_retries)
 
-            parsed = parse_order_response(submit)
+            parsed = parse_order_response(submit, field_map=self.order_field_map)
             order_id = parsed["order_id"] or payload["client_order_id"]
             final_order_id = order_id
             status = parsed["status"]

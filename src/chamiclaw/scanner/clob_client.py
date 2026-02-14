@@ -7,7 +7,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from chamiclaw.exchange.endpoints import load_clob_endpoints
+from chamiclaw.exchange.endpoints import load_clob_endpoints, load_clob_field_map
 from chamiclaw.exchange.normalize import parse_orderbook_response
 
 
@@ -15,8 +15,10 @@ class CLOBClient:
     def __init__(self, base_url: str, config: dict[str, Any] | None = None, path_template: str = "/book?market={market_id}") -> None:
         self.base_url = base_url.rstrip("/")
         self.path_template = path_template
+        self.orderbook_field_map: dict[str, Any] = {}
         if config:
             self.path_template = str(config.get("scan", {}).get("orderbook_path_template", load_clob_endpoints(config).orderbook))
+            self.orderbook_field_map = dict(load_clob_field_map(config).get("orderbook", {}) or {})
 
     def _request_json(self, url: str, timeout_sec: float) -> Any:
         headers = {"User-Agent": "ChamiClaw/0.1"}
@@ -37,4 +39,4 @@ class CLOBClient:
             payload = self._request_json(url, timeout_sec=timeout_sec)
         except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
             return None
-        return parse_orderbook_response(payload)
+        return parse_orderbook_response(payload, field_map=self.orderbook_field_map)

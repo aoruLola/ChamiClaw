@@ -81,7 +81,9 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - LLM fallback pressure check command:
   - `chamiclaw llm-fallback-check --config config/config.yaml --iterations 50`
   - verifies structural fallback keeps producing signals when LLM is forced to fail.
-- Exchange endpoint mapping is configurable via `apis.clob_profile` + `apis.clob_endpoints` (submit/status/cancel/orderbook/positions), with env overrides `CHAMICLAW_CLOB_*_ENDPOINT`.
+- Exchange mapping supports profile-level defaults and custom overrides:
+  - Endpoints: `apis.clob_profile` + `apis.clob_endpoints` (submit/status/cancel/orderbook/positions), with env overrides `CHAMICLAW_CLOB_*_ENDPOINT`.
+  - Response fields: `apis.clob_field_map` for `order` / `orderbook` / `positions` aliases.
 - `run-once` stability guard:
   - `scan.max_cycle_runtime_sec` caps per-cycle runtime (partial commit + WARN audit when exceeded).
   - `scan.max_orderbook_calls_per_cycle` limits orderbook requests.

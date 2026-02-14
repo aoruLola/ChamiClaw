@@ -7,7 +7,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from chamiclaw.db.sqlite import Database
-from chamiclaw.exchange.endpoints import load_clob_endpoints
+from chamiclaw.exchange.endpoints import load_clob_endpoints, load_clob_field_map
 from chamiclaw.exchange.normalize import parse_positions_response
 from chamiclaw.ops.alerting import post_discord_alert
 from chamiclaw.ops.state_machine import SystemStateMachine
@@ -26,6 +26,7 @@ class ReconcileConfig:
 class ReconcileEngine:
     def __init__(self, config: dict | None = None) -> None:
         cfg = config or {}
+        self.positions_field_map = dict(load_clob_field_map(cfg).get("positions", {}) or {})
         rec = cfg.get("reconcile", {})
         endpoint = str(rec.get("exchange_positions_endpoint", "")).strip()
         if not endpoint:
@@ -54,7 +55,7 @@ class ReconcileEngine:
             data = json.loads(raw) if raw else []
         except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError):
             return {}
-        return parse_positions_response(data)
+        return parse_positions_response(data, field_map=self.positions_field_map)
 
     def compare(self, local_positions: dict, exchange_positions: dict) -> dict:
         mismatches: list[dict] = []

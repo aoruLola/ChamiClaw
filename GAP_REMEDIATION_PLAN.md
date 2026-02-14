@@ -231,9 +231,9 @@
   - 对账异常告警（WARN/CRITICAL）与日报 drill 汇总字段
   - 交易所响应适配层（order/orderbook/positions 统一解析）与 `go-no-go` 门槛检查命令
   - 交易所 endpoint 配置化（`apis.clob_endpoints` + env 覆盖）与 `run-once` 运行时预算保护（防长周期卡死）
+  - 交易所字段映射配置化（`apis.clob_field_map`）+ `clob_profile` 默认映射（default/legacy_v1），并接入执行/行情/对账链路统一解析
   - `run-once` 信号丢弃原因统计（drop reasons）+ 日报展示 latest_run_once/go_no_go
   - `llm-fallback-check` 门槛校验命令（强制 LLM 失败下验证结构降级稳定性）
 
 - 待继续深化（仍未完成的“最后一段路”）：
-  - 交易所真实 endpoint 字段映射稳定化（多交易所 profile 级适配）
   - 真实联调压测与门槛验证（Go/No-Go 五项）    
