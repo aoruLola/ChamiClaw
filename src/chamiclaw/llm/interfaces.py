@@ -65,8 +65,8 @@ class _HttpLlmMixin:
                     time.sleep(min(2.0, 0.2 * (2**attempt)))
         raise LlmProviderError(f"LLM request failed after retries: {last_err}")
 
-    def _openai_payload(self, task: str, market_prob: float, fair_prob: float | None, features: dict[str, Any]) -> dict[str, Any]:
-        model = self.default_model or "moonshotai/Kimi-K2.5"
+    def _openai_payload(self, task: str, market_prob: float, fair_prob: float | None, features: dict[str, Any], model: str | None = None) -> dict[str, Any]:
+        model = model or self.default_model or "moonshotai/Kimi-K2.5"
         schema_hint = {
             "fair_prob": 0.5,
             "confidence": 0.7,
@@ -119,7 +119,9 @@ class _HttpLlmMixin:
 class Llm1Generator(_HttpLlmMixin):
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self.endpoint = str(config.get("llm", {}).get("llm1_endpoint", "")).strip()
+        llm_cfg = config.get("llm", {})
+        self.endpoint = str(llm_cfg.get("llm1_endpoint", "")).strip()
+        self.model = str(llm_cfg.get("llm1_model", "")).strip() or os.getenv("CHAMICLAW_LLM1_MODEL", "").strip() or self.default_model
 
     def infer(self, market_prob: float, features: dict[str, Any]) -> LlmOutput:
         if self.mode == "http":
@@ -129,7 +131,7 @@ class Llm1Generator(_HttpLlmMixin):
                 "features": features,
             }
             if "/chat/completions" in self.endpoint:
-                payload = self._openai_payload("llm1_fair_prob", market_prob=market_prob, fair_prob=None, features=features)
+                payload = self._openai_payload("llm1_fair_prob", market_prob=market_prob, fair_prob=None, features=features, model=self.model)
             out = self._request_with_retry(self.endpoint, payload)
             out = self._normalize_output(out)
             req_id = str(out.get("request_id") or out.get("id") or "")
@@ -152,7 +154,9 @@ class Llm1Generator(_HttpLlmMixin):
 class Llm2Validator(_HttpLlmMixin):
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self.endpoint = str(config.get("llm", {}).get("llm2_endpoint", "")).strip()
+        llm_cfg = config.get("llm", {})
+        self.endpoint = str(llm_cfg.get("llm2_endpoint", "")).strip()
+        self.model = str(llm_cfg.get("llm2_model", "")).strip() or os.getenv("CHAMICLAW_LLM2_MODEL", "").strip() or self.default_model
 
     def validate(self, market_prob: float, fair_prob: float, features: dict[str, Any]) -> LlmOutput:
         if self.mode == "http":
@@ -163,7 +167,7 @@ class Llm2Validator(_HttpLlmMixin):
                 "features": features,
             }
             if "/chat/completions" in self.endpoint:
-                payload = self._openai_payload("llm2_validate", market_prob=market_prob, fair_prob=fair_prob, features=features)
+                payload = self._openai_payload("llm2_validate", market_prob=market_prob, fair_prob=fair_prob, features=features, model=self.model)
             out = self._request_with_retry(self.endpoint, payload)
             out = self._normalize_output(out)
             req_id = str(out.get("request_id") or out.get("id") or "")

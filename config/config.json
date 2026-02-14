@@ -80,6 +80,8 @@
     "max_retries": 2,
     "llm1_endpoint": "",
     "llm2_endpoint": "",
+    "llm1_model": "",
+    "llm2_model": "",
     "api_key_env": "CHAMICLAW_LLM_API_KEY"
   },
   "ops": {
