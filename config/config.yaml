@@ -35,11 +35,13 @@ signal:
   llm_enter_edge_bps: 80
   min_llm_enter_edge_bps: 20
   research_relaxation_bps: 40
+  live_llm_enter_edge_bps: 40
   exit_edge_bps: 80
   no_trade_zone_bps: 120
   min_confidence: 0.62
   min_confidence_floor: 0.5
   research_confidence_relax: 0.07
+  live_min_confidence: 0.55
   trading_fee_pct: 0.02
   slippage_bps: 40
   assumed_order_notional_usd: 100

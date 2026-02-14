@@ -30,7 +30,7 @@
 - 信号掉落已细分为（最新）：
   - `EDGE_AFTER_COST_BELOW_THRESHOLD=12`
   - `RAW_EDGE_BELOW_THRESHOLD=7`
-- 已完成一版 reachability 修复：research 模式阈值放松（仅 dry-run 生效），信号由 0 提升到可产出（稳定 2 条/轮左右）。
+- 已完成一版 reachability 修复：research 模式阈值放松（仅 dry-run 生效），信号由 0 提升到可产出（稳定 2-3 条/轮）。
 - Go/No-Go 已升级并通过最新验证（在研究策略门槛下）：`final_verdict=GO`。
 - 新增 `live-readiness` 与 `deploy-readiness` 预检命令，用于阻断“研究模式 GO 误判为可实盘”，并输出部署闸门报告。
 - 执行层新增 live precheck 拦截：已支持 `py-clob-client` 后端，若缺私钥/L2凭证或非 `execution` 角色将拒单，避免盲目实盘请求。
@@ -45,7 +45,8 @@
    - [x] 主流程接入 `peer_markets`，`cross_market` / `term_structure` 已可参与
    - [x] 拆分并记录 drop reason 指标（edge/cost/confidence/conflict）
    - [x] research 模式阈值放松（仅 dry-run）
-   - [ ] 进一步提升有效样本（当前 go/no-go 仍因 `min_effective_edge_sample` 阻塞）
+   - [x] live 模式独立阈值（`live_llm_enter_edge_bps` / `live_min_confidence`）
+   - [ ] 继续提升有效样本与成本后正 edge 占比
 2. **成本模型与阈值一致性修复（仍高优先）**
    - 明确 fee/slippage/chain 的口径与单位（bps）
    - 对 `expected_edge_after_costs_bps` 增加审计日志，避免“过度扣减”误伤

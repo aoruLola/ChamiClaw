@@ -135,15 +135,21 @@ class SignalEngine:
         expected_edge_after_costs_bps = edge_bps_raw - costs.total_bps
 
         signal_cfg = self.config.get("signal", {})
-        llm_enter_threshold_bps = float(signal_cfg.get("llm_enter_edge_bps", signal_cfg.get("enter_edge_bps", 80)))
+        is_dry_run = bool(self.config.get("execution", {}).get("dry_run", True))
 
-        # Research-mode relaxation: improve reachability while keeping a floor.
-        # Applies only in dry-run mode.
-        if bool(self.config.get("execution", {}).get("dry_run", True)):
+        if is_dry_run:
+            llm_enter_threshold_bps = float(signal_cfg.get("llm_enter_edge_bps", signal_cfg.get("enter_edge_bps", 80)))
             relax_bps = float(signal_cfg.get("research_relaxation_bps", 0))
             min_floor_bps = float(signal_cfg.get("min_llm_enter_edge_bps", 20))
             if relax_bps > 0:
                 llm_enter_threshold_bps = max(min_floor_bps, llm_enter_threshold_bps - relax_bps)
+        else:
+            llm_enter_threshold_bps = float(
+                signal_cfg.get(
+                    "live_llm_enter_edge_bps",
+                    signal_cfg.get("llm_enter_edge_bps", signal_cfg.get("enter_edge_bps", 80)),
+                )
+            )
 
         if structural is None and llm2 is not None and expected_edge_after_costs_bps < llm_enter_threshold_bps:
             drop_reason = "EDGE_BELOW_ENTER_THRESHOLD"
@@ -168,12 +174,14 @@ class SignalEngine:
             return None
 
         confidence = min(p["confidence"] for p in predictions if p["confidence"] is not None)
-        min_confidence = float(signal_cfg.get("min_confidence", 0.62))
-        if bool(self.config.get("execution", {}).get("dry_run", True)):
+        if is_dry_run:
+            min_confidence = float(signal_cfg.get("min_confidence", 0.62))
             conf_relax = float(signal_cfg.get("research_confidence_relax", 0.0))
             conf_floor = float(signal_cfg.get("min_confidence_floor", 0.50))
             if conf_relax > 0:
                 min_confidence = max(conf_floor, min_confidence - conf_relax)
+        else:
+            min_confidence = float(signal_cfg.get("live_min_confidence", signal_cfg.get("min_confidence", 0.62)))
 
         if structural is None and confidence < min_confidence:
             if debug is not None:
