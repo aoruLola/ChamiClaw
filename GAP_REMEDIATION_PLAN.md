@@ -256,6 +256,7 @@
   - 测试基线修复：数据库连接上下文关闭与事务提交语义恢复；风险用例对齐 `NEGATIVE_EDGE` 优先级
   - 联调压测编排命令：`validate-go-no-go`（run-once/reconcile/llm-fallback-check/go-no-go 串联）并输出 `reports/go_no_go_validation.json`
   - 日报联动：`report` 新增 `latest_go_no_go_validation` 摘要字段（若验证报告存在）
+  - Go/No-Go 判定增强落地：新增 `flow_verdict` / `trading_verdict` 双 verdict，交易有效性门槛纳入 `recent_run_once_cycles/recent_signals_generated/edge_positive_after_cost_ratio`；并统一 `go-no-go` 与 `report` 命令读取 `go_no_go` 配置口径
   - `run-once` 改为“两阶段流水线”（先全量市场/quote，再统一信号/执行），确保 `peer_markets` 在主流程可用，`cross_market/term_structure` 可拿到同事件同周期上下文
   - 信号丢弃审计增强：`SIGNAL_DROP` 记录 `drop_category(edge/cost/confidence/conflict/availability)` 与 `raw_edge_bps/expected_edge_after_costs_bps/threshold_bps/cost_breakdown`
   - research 参数回放命令：`threshold-grid`（`llm_enter_edge_bps` × `min_confidence` 网格扫描）并输出 `reports/threshold_grid.json`

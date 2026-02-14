@@ -30,6 +30,11 @@ class _FakeDb:
             "reconcile_recent_bad": 0,
             "llm_error_preds": 0,
             "llm_total_preds": 1,
+            "recent_run_once_cycles": 3,
+            "recent_signals_generated": 2,
+            "edge_sample_count": 20,
+            "edge_positive_after_cost_count": 12,
+            "edge_positive_after_cost_ratio": 0.6,
         }
 
 
@@ -63,6 +68,11 @@ class GoNoGoValidationTest(unittest.TestCase):
             "reconcile_recent_bad": 0,
             "llm_error_preds": 0,
             "llm_total_preds": 1,
+            "recent_run_once_cycles": 3,
+            "recent_signals_generated": 2,
+            "edge_sample_count": 20,
+            "edge_positive_after_cost_count": 12,
+            "edge_positive_after_cost_ratio": 0.6,
         }
 
     def _bad_snapshot(self):

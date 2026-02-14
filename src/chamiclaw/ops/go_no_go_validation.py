@@ -20,26 +20,68 @@ def _build_app(config_path: str) -> tuple[dict[str, Any], Database, ChamiClawApp
     return cfg, db, ChamiClawApp(cfg, db, logger)
 
 
-def build_go_no_go_payload(snap: dict[str, Any]) -> dict[str, Any]:
-    risk_complete_rate = 1.0
-    if snap["total_risk_rejects"] > 0:
-        risk_complete_rate = snap["risk_reject_complete"] / snap["total_risk_rejects"]
-    llm_degrade_rate = 0.0
-    if snap["llm_total_preds"] > 0:
-        llm_degrade_rate = snap["llm_error_preds"] / snap["llm_total_preds"]
+def build_go_no_go_payload(snap: dict[str, Any], policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    p = policy or {}
 
-    checks = {
-        "reconcile_stable_recent": snap["reconcile_recent_bad"] == 0 and snap["reconcile_recent_total"] > 0,
-        "duplicate_orders_zero": snap["duplicate_order_signals"] == 0,
+    min_recent_cycles = max(1, int(p.get("min_recent_cycles", 3)))
+    min_recent_signals = max(1, int(p.get("min_recent_signals", 1)))
+    min_edge_sample_size = max(1, int(p.get("min_edge_sample_size", 10)))
+    min_edge_positive_ratio = float(p.get("min_edge_positive_ratio", 0.5))
+    max_llm_degrade_rate = float(p.get("max_llm_degrade_rate", 0.2))
+
+    total_risk_rejects = int(snap.get("total_risk_rejects", 0))
+    risk_reject_complete = int(snap.get("risk_reject_complete", 0))
+    llm_total_preds = int(snap.get("llm_total_preds", 0))
+    llm_error_preds = int(snap.get("llm_error_preds", 0))
+    recent_cycles = int(snap.get("recent_run_once_cycles", 0))
+    recent_signals_generated = int(snap.get("recent_signals_generated", 0))
+    edge_sample_count = int(snap.get("edge_sample_count", 0))
+    edge_positive_ratio = float(snap.get("edge_positive_after_cost_ratio", 0.0))
+
+    risk_complete_rate = 1.0
+    if total_risk_rejects > 0:
+        risk_complete_rate = risk_reject_complete / total_risk_rejects
+    llm_degrade_rate = 0.0
+    if llm_total_preds > 0:
+        llm_degrade_rate = llm_error_preds / llm_total_preds
+
+    flow_checks = {
+        "reconcile_stable_recent": int(snap.get("reconcile_recent_bad", 0)) == 0 and int(snap.get("reconcile_recent_total", 0)) > 0,
+        "duplicate_orders_zero": int(snap.get("duplicate_order_signals", 0)) == 0,
         "risk_reject_trace_complete": risk_complete_rate >= 1.0,
-        "edge_check_coverage_ok": snap["edge_violation_orders"] == 0,
-        "llm_degrade_controlled": llm_degrade_rate <= 0.2,
+        "edge_check_coverage_ok": int(snap.get("edge_violation_orders", 0)) == 0,
+        "llm_degrade_controlled": llm_degrade_rate <= max_llm_degrade_rate,
     }
-    blockers = [k for k, ok in checks.items() if not ok]
+    trading_checks = {
+        "min_signal_cycles_ok": recent_cycles >= min_recent_cycles,
+        "min_signals_generated_recent": recent_signals_generated >= min_recent_signals,
+        "min_effective_edge_sample": edge_sample_count >= min_edge_sample_size,
+        "edge_after_cost_positive_ratio_ok": edge_positive_ratio >= min_edge_positive_ratio,
+    }
+
+    flow_blockers = [k for k, ok in flow_checks.items() if not ok]
+    trading_blockers = [k for k, ok in trading_checks.items() if not ok]
+    blockers = flow_blockers + trading_blockers
+    flow_verdict = "GO" if not flow_blockers else "NO_GO"
+    trading_verdict = "GO" if not trading_blockers else "NO_GO"
+
     return {
         "verdict": "GO" if not blockers else "NO_GO",
-        "checks": checks,
+        "flow_verdict": flow_verdict,
+        "trading_verdict": trading_verdict,
+        "checks": {**flow_checks, **trading_checks},
+        "flow_checks": flow_checks,
+        "trading_checks": trading_checks,
         "blockers": blockers,
+        "flow_blockers": flow_blockers,
+        "trading_blockers": trading_blockers,
+        "policy": {
+            "min_recent_cycles": min_recent_cycles,
+            "min_recent_signals": min_recent_signals,
+            "min_edge_sample_size": min_edge_sample_size,
+            "min_edge_positive_ratio": min_edge_positive_ratio,
+            "max_llm_degrade_rate": max_llm_degrade_rate,
+        },
         "metrics": {
             **snap,
             "risk_reject_trace_complete_rate": risk_complete_rate,
@@ -61,7 +103,11 @@ def load_go_no_go_validation_summary(path: str = "reports/go_no_go_validation.js
         return {"raw": raw}
     return {
         "verdict": final.get("verdict"),
+        "flow_verdict": final.get("flow_verdict"),
+        "trading_verdict": final.get("trading_verdict"),
         "blockers": final.get("blockers", []),
+        "flow_blockers": final.get("flow_blockers", []),
+        "trading_blockers": final.get("trading_blockers", []),
         "best_go_streak": final.get("best_go_streak"),
         "required_go_streak": final.get("required_go_streak"),
         "latest_go_no_go_checks": (final.get("latest_go_no_go", {}) or {}).get("checks", {}),
@@ -140,6 +186,7 @@ def run_go_no_go_validation(
     total_cycles = max(1, int(cycles))
     reconcile_interval = max(1, int(reconcile_every))
     required_streak = max(1, int(require_go_streak))
+    policy = dict(cfg.get("go_no_go", {}) or {})
 
     reconcile_engine = ReconcileEngine(cfg)
     go_streak = 0
@@ -154,7 +201,7 @@ def run_go_no_go_validation(
         if i % reconcile_interval == 0:
             reconcile_result = reconcile_engine.run(db, apply_state=True)
 
-        go_no_go = build_go_no_go_payload(db.get_go_no_go_snapshot())
+        go_no_go = build_go_no_go_payload(db.get_go_no_go_snapshot(), policy=policy)
         if go_no_go["verdict"] == "GO":
             go_streak += 1
         else:
@@ -172,7 +219,7 @@ def run_go_no_go_validation(
         )
 
     fallback = run_llm_fallback_probe(cfg, fallback_iterations)
-    last_go = rows[-1]["go_no_go"] if rows else build_go_no_go_payload(db.get_go_no_go_snapshot())
+    last_go = rows[-1]["go_no_go"] if rows else build_go_no_go_payload(db.get_go_no_go_snapshot(), policy=policy)
     blockers = list(last_go["blockers"])
     if best_go_streak < required_streak:
         blockers.append("go_streak_not_met")

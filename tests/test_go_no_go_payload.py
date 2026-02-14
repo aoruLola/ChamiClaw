@@ -52,6 +52,37 @@ class GoNoGoPayloadTest(unittest.TestCase):
         self.assertEqual(summary["best_go_streak"], 1)
         self.assertEqual(summary["required_go_streak"], 3)
 
+    def test_payload_splits_flow_and_trading_verdict(self):
+        snap = {
+            "duplicate_order_signals": 0,
+            "edge_violation_orders": 0,
+            "total_risk_rejects": 1,
+            "risk_reject_complete": 1,
+            "reconcile_recent_total": 5,
+            "reconcile_recent_bad": 0,
+            "llm_error_preds": 0,
+            "llm_total_preds": 10,
+            "recent_run_once_cycles": 5,
+            "recent_signals_generated": 0,
+            "edge_sample_count": 0,
+            "edge_positive_after_cost_count": 0,
+            "edge_positive_after_cost_ratio": 0.0,
+        }
+        payload = build_go_no_go_payload(
+            snap,
+            policy={
+                "min_recent_cycles": 3,
+                "min_recent_signals": 1,
+                "min_edge_sample_size": 3,
+                "min_edge_positive_ratio": 0.5,
+            },
+        )
+
+        self.assertEqual(payload["flow_verdict"], "GO")
+        self.assertEqual(payload["trading_verdict"], "NO_GO")
+        self.assertEqual(payload["verdict"], "NO_GO")
+        self.assertIn("min_signals_generated_recent", payload["trading_blockers"])
+
 
 if __name__ == "__main__":
     unittest.main()

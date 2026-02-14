@@ -498,6 +498,41 @@ class Database:
                 """
             ).fetchone()["c"]
 
+            run_once_rows = conn.execute(
+                """
+                SELECT context_json
+                FROM audit_events
+                WHERE category='pipeline' AND code='RUN_ONCE_SUMMARY'
+                ORDER BY ts_utc DESC
+                LIMIT 20
+                """
+            ).fetchall()
+            recent_run_once_cycles = len(run_once_rows)
+            recent_signals_generated = 0
+            for row in run_once_rows:
+                try:
+                    ctx = json.loads(row["context_json"] or "{}")
+                except json.JSONDecodeError:
+                    ctx = {}
+                recent_signals_generated += int(ctx.get("signals_generated", 0) or 0)
+
+            edge_rows = conn.execute(
+                """
+                SELECT expected_edge_after_costs_bps
+                FROM signals
+                ORDER BY created_at_utc DESC
+                LIMIT 200
+                """
+            ).fetchall()
+            edge_sample_count = len(edge_rows)
+            edge_positive_after_cost_count = 0
+            for row in edge_rows:
+                if float(row["expected_edge_after_costs_bps"] or 0.0) > 0:
+                    edge_positive_after_cost_count += 1
+            edge_positive_after_cost_ratio = (
+                float(edge_positive_after_cost_count) / float(edge_sample_count) if edge_sample_count > 0 else 0.0
+            )
+
         return {
             "duplicate_order_signals": int(duplicate_order_signals),
             "edge_violation_orders": int(edge_violation_orders),
@@ -507,4 +542,9 @@ class Database:
             "reconcile_recent_bad": int(reconcile_recent_bad),
             "llm_error_preds": int(llm_error_preds),
             "llm_total_preds": int(llm_total_preds),
+            "recent_run_once_cycles": int(recent_run_once_cycles),
+            "recent_signals_generated": int(recent_signals_generated),
+            "edge_sample_count": int(edge_sample_count),
+            "edge_positive_after_cost_count": int(edge_positive_after_cost_count),
+            "edge_positive_after_cost_ratio": float(edge_positive_after_cost_ratio),
         }

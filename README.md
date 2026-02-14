@@ -81,7 +81,14 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - Calibration supports `isotonic` and `platt` modes (`evaluate.calibration_method`), emits parameter recommendations, and writes strategy versions into DB.
 - Drill command supports batch mode: `drill --scenario all` and writes records to `reports/drills.jsonl`.
 - Go/No-Go gate command: `chamiclaw go-no-go --config config/config.yaml`
-  - checks reconcile stability, duplicate orders, risk-trace completeness, edge gate coverage, and llm degrade rate.
+  - outputs dual verdicts: `flow_verdict` (process health) + `trading_verdict` (signal/effective-edge readiness).
+  - `verdict` is `GO` only when both verdicts are `GO`.
+  - policy comes from `go_no_go` config:
+    - `min_recent_cycles`
+    - `min_recent_signals`
+    - `min_edge_sample_size`
+    - `min_edge_positive_ratio`
+    - `max_llm_degrade_rate`
 - Integrated Go/No-Go validation command:
   - `chamiclaw validate-go-no-go --config config/config.yaml --cycles 20 --reconcile-every 5 --fallback-iterations 50 --require-go-streak 3`
   - writes `reports/go_no_go_validation.json` with per-cycle run/reconcile/go-no-go evidence and final blockers.

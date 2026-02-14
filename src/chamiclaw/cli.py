@@ -192,9 +192,10 @@ def cmd_llm_fallback_check(config: str, iterations: int) -> None:
 
 
 def cmd_go_no_go(config: str) -> None:
-    _, db, _ = _build_app(config)
+    cfg, db, _ = _build_app(config)
     snap = db.get_go_no_go_snapshot()
-    payload = build_go_no_go_payload(snap)
+    policy = dict(cfg.get("go_no_go", {}) or {})
+    payload = build_go_no_go_payload(snap, policy=policy)
     print(json.dumps(payload, ensure_ascii=True))
 
 
@@ -312,7 +313,7 @@ def cmd_backtest(config: str) -> None:
 
 
 def cmd_report(config: str) -> None:
-    _, db, _ = _build_app(config)
+    cfg, db, _ = _build_app(config)
     with db.connect() as conn:
         counts = {
             "markets": conn.execute("SELECT COUNT(*) FROM markets").fetchone()[0],
@@ -341,7 +342,8 @@ def cmd_report(config: str) -> None:
                 drill_summary["latest"] = json.loads(lines[-1])
             except json.JSONDecodeError:
                 drill_summary["latest"] = {"raw": lines[-1]}
-    go_no_go = build_go_no_go_payload(db.get_go_no_go_snapshot())
+    policy = dict(cfg.get("go_no_go", {}) or {})
+    go_no_go = build_go_no_go_payload(db.get_go_no_go_snapshot(), policy=policy)
     latest_go_no_go_validation = load_go_no_go_validation_summary()
     latest_run_once = None
     with db.connect() as conn:
