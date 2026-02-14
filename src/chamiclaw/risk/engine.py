@@ -67,6 +67,14 @@ class RiskEngine:
             except ValueError:
                 return RiskDecision(False, "BAD_END_TIME", "invalid end time", details={"actual": str(end_time)})
 
+        if bool(risk.get("forbid_directional_add", False)) and bool(order_intent.get("directional_add", False)):
+            return RiskDecision(
+                False,
+                "DIRECTIONAL_ADD_BLOCKED",
+                "directional add is blocked by stable income mode",
+                details={"directional_add": True},
+            )
+
         if order_intent.get("daily_drawdown_pct", 0) >= risk["daily_max_drawdown_pct"]:
             return RiskDecision(
                 False,
@@ -75,12 +83,15 @@ class RiskEngine:
                 details={"actual": float(order_intent.get("daily_drawdown_pct", 0)), "threshold": float(risk["daily_max_drawdown_pct"])},
             )
 
-        if order_intent.get("open_orders_same_market", 0) >= risk.get("max_open_orders_per_market", 1):
+        open_order_limit = int(risk.get("max_open_orders_per_market", 1))
+        if bool(order_intent.get("is_market_making", False)):
+            open_order_limit = max(2, open_order_limit)
+        if order_intent.get("open_orders_same_market", 0) >= open_order_limit:
             return RiskDecision(
                 False,
                 "OPEN_ORDER_LIMIT",
                 "too many open orders",
-                details={"actual": int(order_intent.get("open_orders_same_market", 0)), "threshold": int(risk.get("max_open_orders_per_market", 1))},
+                details={"actual": int(order_intent.get("open_orders_same_market", 0)), "threshold": open_order_limit},
             )
 
         return RiskDecision(True, None, "ok", details={"expected_edge_after_costs_bps": edge_after_costs})

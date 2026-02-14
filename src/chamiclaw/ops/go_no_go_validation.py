@@ -238,6 +238,8 @@ def run_go_no_go_validation(
         "llm_fallback": fallback,
         "final": {
             "verdict": "GO" if not blockers else "NO_GO",
+            "flow_verdict": last_go.get("flow_verdict"),
+            "trading_verdict": last_go.get("trading_verdict"),
             "blockers": blockers,
             "best_go_streak": best_go_streak,
             "required_go_streak": required_streak,

@@ -136,7 +136,8 @@ class ExecutionEngine:
 
     def _live_precheck_failures(self) -> list[str]:
         failures: list[str] = []
-        if get_runtime_role() != "execution":
+        require_runtime_role = bool(self.execution_cfg.get("require_runtime_role", False))
+        if require_runtime_role and get_runtime_role() != "execution":
             failures.append("runtime_role_not_execution")
 
         if self.backend == "py-clob-client":
@@ -148,7 +149,8 @@ class ExecutionEngine:
 
         if not self.base_url:
             failures.append("clob_base_missing")
-        if not os.getenv("CLOB_API_KEY", "").strip():
+        require_api_key = bool(self.execution_cfg.get("require_api_key", False))
+        if require_api_key and not os.getenv("CLOB_API_KEY", "").strip():
             failures.append("CLOB_API_KEY_missing")
         if not self.endpoints.submit_order or not self.endpoints.order_status or not self.endpoints.cancel_order:
             failures.append("clob_endpoints_incomplete")
@@ -203,6 +205,14 @@ class ExecutionEngine:
 
     def build_order_intent(self, signal: dict, quote: dict, market: dict, risk_snapshot: dict | None = None) -> dict:
         snapshot = risk_snapshot or {}
+        side = str(signal.get("side", ""))
+        yes_qty = float(snapshot.get("yes_qty", 0.0) or 0.0)
+        no_qty = float(snapshot.get("no_qty", 0.0) or 0.0)
+        directional_add = False
+        if side in {"buy_yes", "buy_basket"}:
+            directional_add = yes_qty > no_qty
+        elif side == "buy_no":
+            directional_add = no_qty > yes_qty
         return {
             "market_id": signal["market_id"],
             "spread_bps": quote.get("spread_bps", 0),
@@ -212,7 +222,11 @@ class ExecutionEngine:
             "daily_drawdown_pct": snapshot.get("daily_drawdown_pct", 0.0),
             "open_orders_same_market": snapshot.get("open_orders_same_market", 0),
             "end_time_utc": market.get("end_time_utc"),
-            "is_add_position": True,
+            "is_add_position": bool(signal.get("is_add_position", True)),
+            "yes_qty": yes_qty,
+            "no_qty": no_qty,
+            "directional_add": directional_add,
+            "is_market_making": bool(signal.get("is_market_making", False)),
         }
 
     def build_order(self, signal: dict, quote: dict) -> tuple[float, float]:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import random
 import time
 from typing import Any
 
@@ -29,21 +31,21 @@ class PipelineResult:
     signals_generated: int
     orders_submitted: int
     signal_drop_counts: dict[str, int]
-    max_raw_edge_bps: float
-    min_spread_bps: float
-    structural_signal_counts: dict[str, int]
-    bbo_markets: int
-    top_edge_market_debug: dict[str, Any]
-    edge_calc_attempted: int
-    edge_calc_success: int
-    edge_calc_failed: int
-    edge_calc_skipped: int
-    edge_calc_errors: list[dict[str, Any]]
-    p50_edge_bps: float
-    p90_edge_bps: float
-    p99_edge_bps: float
-    max_edge_bps: float
-    top3_edges: list[dict[str, Any]]
+    max_raw_edge_bps: float = 0.0
+    min_spread_bps: float = 0.0
+    structural_signal_counts: dict[str, int] = field(default_factory=lambda: {"pair_cost_hit": 0, "cross_market_hit": 0, "term_structure_hit": 0})
+    bbo_markets: int = 0
+    top_edge_market_debug: dict[str, Any] = field(default_factory=dict)
+    edge_calc_attempted: int = 0
+    edge_calc_success: int = 0
+    edge_calc_failed: int = 0
+    edge_calc_skipped: int = 0
+    edge_calc_errors: list[dict[str, Any]] = field(default_factory=list)
+    p50_edge_bps: float = 0.0
+    p90_edge_bps: float = 0.0
+    p99_edge_bps: float = 0.0
+    max_edge_bps: float = 0.0
+    top3_edges: list[dict[str, Any]] = field(default_factory=list)
     baseline_mode: bool = True
     active_mm_markets: list[str] = field(default_factory=list)
     active_arbitrage_markets: list[str] = field(default_factory=list)
@@ -53,6 +55,11 @@ class PipelineResult:
     mm_selected_count: int = 0
     mm_reject_counts: dict[str, int] = field(default_factory=dict)
     mm_sample_rejects: list[dict[str, Any]] = field(default_factory=list)
+    total_inventory: float = 0.0
+    total_inventory_net: float = 0.0
+    total_exposure_ratio: float = 0.0
+    daily_pnl: float = 0.0
+    risk_status: str = "NORMAL"
 
 
 class ChamiClawApp:
@@ -99,7 +106,61 @@ class ChamiClawApp:
         stats[key] = int(stats.get(key, 0)) + 1
         p.write_text(json.dumps(stats, ensure_ascii=True), encoding="utf-8")
 
+    def _portfolio_risk_snapshot(self, quote_by_market_id: dict[str, dict[str, Any]] | None = None) -> dict[str, float]:
+        qmap = quote_by_market_id or {}
+        equity = max(1.0, float(self.config.get("risk", {}).get("account_equity_usd", 10_000)))
+        day_start = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
+        total_inventory = 0.0
+        total_inventory_net = 0.0
+        total_exposure_usd = 0.0
+        with self.db.connect() as conn:
+            rows = conn.execute("SELECT market_id, yes_qty, no_qty FROM positions").fetchall()
+            pnl_row = conn.execute(
+                """
+                SELECT COALESCE(SUM(pnl_usd), 0) AS pnl
+                FROM trades
+                WHERE ts_utc >= ?
+                """,
+                (day_start,),
+            ).fetchone()
+        daily_pnl = float((pnl_row["pnl"] if pnl_row else 0.0) or 0.0)
+        for row in rows:
+            market_id = str(row["market_id"])
+            yes_qty = float(row["yes_qty"] or 0.0)
+            no_qty = float(row["no_qty"] or 0.0)
+            q = qmap.get(market_id)
+            if q is None:
+                q = self.db.get_latest_quote(market_id) or {}
+            yes_mid = float(q.get("yes_mid", 0.5) or 0.5)
+            no_mid = float(q.get("no_mid", 0.5) or 0.5)
+            yes_notional = yes_qty * yes_mid
+            no_notional = no_qty * no_mid
+            signed_notional = yes_notional - no_notional
+            total_inventory += abs(signed_notional)
+            total_inventory_net += signed_notional
+            total_exposure_usd += yes_notional + no_notional
+        return {
+            "equity": float(equity),
+            "daily_pnl": float(daily_pnl),
+            "daily_drawdown_pct": float(max(0.0, -daily_pnl / equity)),
+            "total_inventory": float(total_inventory),
+            "total_inventory_net": float(total_inventory_net),
+            "total_exposure_ratio": float(total_exposure_usd / equity),
+        }
 
+    def _should_auto_recover_daily_halt(self, state: Any) -> bool:
+        if str(getattr(state, "state", "")) != "HALTED":
+            return False
+        reason = str(getattr(state, "reason", ""))
+        if "RISK_HALT_DAILY_DRAWDOWN" not in reason:
+            return False
+        updated_at = str(getattr(state, "updated_at_utc", ""))
+        try:
+            halted_dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00")).astimezone(timezone.utc)
+        except ValueError:
+            return False
+        now = datetime.now(timezone.utc)
+        return halted_dt.date() < now.date()
 
     def _load_mm_state(self) -> dict[str, Any]:
         p = Path("reports/mm_state.json")
@@ -117,10 +178,16 @@ class ChamiClawApp:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(state, ensure_ascii=True), encoding="utf-8")
 
+    def _mm_cancel_all_orders(self, state: dict[str, Any]) -> None:
+        markets_state = dict(state.get("markets", {}) or {})
+        for market_id in list(markets_state.keys()):
+            self._mm_cancel_market_orders(str(market_id), state)
+
     def _mm_cancel_market_orders(self, market_id: str, state: dict[str, Any]) -> None:
         markets_state = state.setdefault("markets", {})
-        ms = markets_state.setdefault(market_id, {"loss_streak": 0, "paused_until": 0.0, "active_orders": {}})
+        ms = markets_state.setdefault(market_id, {"loss_streak": 0, "paused_until": 0.0, "active_orders": {}, "next_requote_at": {}})
         active = dict(ms.get("active_orders", {}) or {})
+        next_requote_at = dict(ms.get("next_requote_at", {}) or {})
         for side, oid in list(active.items()):
             if not oid:
                 continue
@@ -139,17 +206,19 @@ class ChamiClawApp:
             }
             self.db.insert_order(order)
             active[side] = ""
+            next_requote_at[side] = 0.0
         ms["active_orders"] = active
+        ms["next_requote_at"] = next_requote_at
 
-    def _mm_audit_reject(self, market_id: str, side: str, price: float, size: float, reject_reason: str, risk_block_reason: str | None = None) -> None:
+    def _mm_audit_reject(self, market_id: str, side: str | None, price: float, size: float, reject_reason: str, risk_block_reason: str | None = None) -> None:
         self.db.insert_audit_event(
             level="WARN",
             category="market_making",
-            code="MM_ORDER_REJECT",
+            code="MM_REJECT",
             message=reject_reason,
             context={
                 "market_id": market_id,
-                "side": side,
+                "side": (side or ""),
                 "price": float(price),
                 "size": float(size),
                 "reject_reason": reject_reason,
@@ -164,18 +233,30 @@ class ChamiClawApp:
         quote_by_market_id: dict[str, dict[str, Any]],
         arbitrage_markets: set[str] | None = None,
     ) -> dict[str, Any]:
-        mm_cfg = self.config.get("market_making", {})
-        if not bool(mm_cfg.get("enabled", True)):
-            return {"executed": False, "orders_submitted": 0, "active_mm_markets": [], "inventory_snapshot": {}, "mm_candidates_count": 0, "mm_selected_count": 0, "mm_reject_counts": {}, "mm_sample_rejects": []}
+        mm_cfg = dict(self.config.get("market_making", {}) or {})
+        mm_cfg["enabled"] = True
+        mm_cfg["baseline_mode"] = True
 
         spread_min = float(mm_cfg.get("min_spread_bps", 40))
         min_liq = float(mm_cfg.get("min_market_liquidity_usd", 100_000))
-        per_market_expo_pct = float(mm_cfg.get("per_market_exposure_pct", 0.06))
-        total_expo_pct = float(mm_cfg.get("total_exposure_pct", 0.30))
+        min_expiry_min = int(mm_cfg.get("min_time_to_expiry_min", 1440))
+        quote_offset_ratio = float(mm_cfg.get("quote_offset_ratio", 0.20))
+        per_market_expo_pct = float(mm_cfg.get("per_market_exposure_pct", 0.03))
+        total_expo_pct = float(mm_cfg.get("total_exposure_pct", 0.20))
         inv_thresh_pct = float(mm_cfg.get("inventory_threshold_pct", 0.02))
         pause_loss_n = int(mm_cfg.get("pause_after_consecutive_losses", 2))
         pause_min = int(mm_cfg.get("pause_minutes", 30))
-        use_llm_fair = bool(mm_cfg.get("use_llm_fair_prob", True))
+        mid_move_pause_bps = float(mm_cfg.get("mid_move_pause_bps_5m", 120))
+        mid_move_pause_hard_bps = float(mm_cfg.get("mid_move_pause_hard_bps_5m", 180))
+        depth_drop_ratio_warn = float(mm_cfg.get("depth_drop_ratio_warn", 0.50))
+        depth_drop_ratio_hard = float(mm_cfg.get("depth_drop_ratio_hard", 0.70))
+        drawdown_throttle_pct = float(mm_cfg.get("drawdown_throttle_pct", 0.03))
+        drawdown_throttle_scale = float(mm_cfg.get("drawdown_throttle_scale", 0.50))
+        drawdown_halt_pct = float(mm_cfg.get("drawdown_halt_pct", 0.05))
+        requote_min_sec = float(mm_cfg.get("requote_min_sec", 30))
+        requote_max_sec = float(mm_cfg.get("requote_max_sec", 60))
+        burst_llm_enabled = bool(mm_cfg.get("burst_llm_enabled", True))
+        burst_llm_confidence_min = float(mm_cfg.get("burst_llm_confidence_min", 0.65))
 
         equity = float(self.config.get("risk", {}).get("account_equity_usd", 10_000))
         per_market_cap = equity * per_market_expo_pct
@@ -193,17 +274,21 @@ class ChamiClawApp:
         mm_reject_counts: dict[str, int] = {
             "MM_SPREAD_TOO_LOW": 0,
             "MM_LIQUIDITY_TOO_LOW": 0,
+            "MM_EXPIRY_TOO_NEAR": 0,
             "MM_INVENTORY_BLOCK": 0,
             "MM_EXPOSURE_BLOCK": 0,
             "MM_COOLDOWN_BLOCK": 0,
             "MM_PAUSED_BLOCK": 0,
+            "MM_REQUOTE_WAIT": 0,
+            "MM_BURST_PAUSE": 0,
             "MM_ORDER_LIMIT_BLOCK": 0,
             "MM_EXECUTION_REJECTED": 0,
             "MM_OTHER": 0,
         }
         mm_sample_rejects: list[dict[str, Any]] = []
+        any_burst_pause = False
 
-        def _rej(reason: str, market_id: str, spread_bps: float, liquidity: float, inventory: float) -> None:
+        def _rej(reason: str, market_id: str, spread_bps: float, liquidity: float, inventory: float, side: str | None = None) -> None:
             mm_reject_counts[reason] = int(mm_reject_counts.get(reason, 0)) + 1
             if len(mm_sample_rejects) < 5:
                 mm_sample_rejects.append({
@@ -213,6 +298,58 @@ class ChamiClawApp:
                     "inventory": inventory,
                     "reason": reason,
                 })
+            self._mm_audit_reject(market_id, side, 0.0, 0.0, reason, None)
+
+        portfolio = self._portfolio_risk_snapshot(quote_by_market_id=quote_by_market_id)
+        daily_pnl = float(portfolio["daily_pnl"])
+        daily_drawdown_pct = float(portfolio["daily_drawdown_pct"])
+        risk_status = "NORMAL"
+        size_scale = 1.0
+        if daily_drawdown_pct > drawdown_halt_pct:
+            self._mm_cancel_all_orders(state)
+            self._save_mm_state(state)
+            self.state.transition("HALTED", "RISK_HALT_DAILY_DRAWDOWN")
+            self.db.insert_audit_event(
+                level="CRITICAL",
+                category="market_making",
+                code="RISK_HALT_DAILY_DRAWDOWN",
+                message="daily drawdown exceeded halt threshold",
+                context={
+                    "daily_drawdown_pct": daily_drawdown_pct,
+                    "threshold": drawdown_halt_pct,
+                    "daily_pnl": daily_pnl,
+                },
+            )
+            return {
+                "executed": True,
+                "orders_submitted": 0,
+                "active_mm_markets": [],
+                "inventory_snapshot": {},
+                "mm_candidates_count": 0,
+                "mm_selected_count": 0,
+                "mm_reject_counts": mm_reject_counts,
+                "mm_sample_rejects": [],
+                "total_inventory": float(portfolio["total_inventory"]),
+                "total_inventory_net": float(portfolio["total_inventory_net"]),
+                "total_exposure_ratio": float(portfolio["total_exposure_ratio"]),
+                "daily_pnl": daily_pnl,
+                "risk_status": "HALTED",
+            }
+        if daily_drawdown_pct > drawdown_throttle_pct:
+            risk_status = "THROTTLED"
+            size_scale = max(0.1, min(1.0, drawdown_throttle_scale))
+            self.db.insert_audit_event(
+                level="WARN",
+                category="market_making",
+                code="MM_DRAWDOWN_THROTTLED",
+                message="daily drawdown triggered size throttle",
+                context={
+                    "daily_drawdown_pct": daily_drawdown_pct,
+                    "threshold": drawdown_throttle_pct,
+                    "scale": size_scale,
+                    "daily_pnl": daily_pnl,
+                },
+            )
 
         for market in markets:
             market_id = str(market.get("market_id"))
@@ -231,8 +368,19 @@ class ChamiClawApp:
             if spread_bps < spread_min:
                 _rej("MM_SPREAD_TOO_LOW", market_id, spread_bps, liquidity, 0.0)
                 continue
+            end_time = str(market.get("end_time_utc") or "")
+            if end_time:
+                try:
+                    dt = datetime.fromisoformat(end_time.replace("Z", "+00:00")).astimezone(timezone.utc)
+                    mins_left = (dt - datetime.now(timezone.utc)).total_seconds() / 60
+                    if mins_left <= min_expiry_min:
+                        _rej("MM_EXPIRY_TOO_NEAR", market_id, spread_bps, liquidity, 0.0)
+                        continue
+                except ValueError:
+                    _rej("MM_EXPIRY_TOO_NEAR", market_id, spread_bps, liquidity, 0.0)
+                    continue
 
-            ms = markets_state.setdefault(market_id, {"loss_streak": 0, "paused_until": 0.0, "active_orders": {}})
+            ms = markets_state.setdefault(market_id, {"loss_streak": 0, "paused_until": 0.0, "active_orders": {}, "next_requote_at": {}})
             if arbitrage_markets and market_id in arbitrage_markets:
                 self._mm_cancel_market_orders(market_id, state)
                 ms["paused_until"] = now + float(mm_cfg.get("mm_cooldown_sec", 60))
@@ -247,10 +395,57 @@ class ChamiClawApp:
                 old_mid = float(recent[-1].get("yes_mid", 0.0) or 0.0)
                 cur_mid = float(quote.get("yes_mid", 0.0) or 0.0)
                 move_bps = abs(cur_mid - old_mid) * 10_000
-                if move_bps > float(mm_cfg.get("mid_move_pause_bps", 150)):
+                cur_depth = float(quote.get("depth_usd", 0.0) or 0.0)
+                old_depth = float(recent[-1].get("depth_usd", cur_depth) or cur_depth)
+                depth_drop_ratio = (max(0.0, old_depth - cur_depth) / old_depth) if old_depth > 0 else 0.0
+                hard_burst = (move_bps > mid_move_pause_hard_bps) or (depth_drop_ratio > depth_drop_ratio_hard)
+                warn_burst = (move_bps > mid_move_pause_bps) or (depth_drop_ratio > depth_drop_ratio_warn)
+                llm_burst = False
+                if (not hard_burst) and warn_burst and burst_llm_enabled:
+                    try:
+                        out = self.signal_engine.llm1.infer(
+                            market_prob=cur_mid,
+                            features={
+                                "depth_imbalance": quote.get("depth_imbalance", 0.0),
+                                "sigma_5m": quote.get("sigma_5m", 0.0),
+                                "mid_move_bps_5m": move_bps,
+                                "depth_drop_ratio": depth_drop_ratio,
+                                "burst_candidate": True,
+                                "market_id": market_id,
+                            },
+                        )
+                        conf = float(getattr(out, "confidence", 0.0) or 0.0)
+                        if conf >= burst_llm_confidence_min:
+                            rationale = str(getattr(out, "rationale", "") or "").lower()
+                            tags = [str(x).lower() for x in (getattr(out, "risk_tags", []) or [])]
+                            keys = ("burst", "breaking", "spike", "shock", "volatility")
+                            llm_burst = any(k in rationale for k in keys) or any(any(k in t for k in keys) for t in tags)
+                    except Exception as exc:
+                        self.db.insert_audit_event(
+                            level="WARN",
+                            category="market_making",
+                            code="MM_BURST_LLM_ERROR",
+                            message="burst llm check failed",
+                            context={"error": str(exc), "market_id": market_id},
+                        )
+                if hard_burst or llm_burst:
+                    any_burst_pause = True
                     self._mm_cancel_market_orders(market_id, state)
                     ms["paused_until"] = now + pause_min * 60
-                    _rej("MM_PAUSED_BLOCK", market_id, spread_bps, liquidity, 0.0)
+                    _rej("MM_BURST_PAUSE", market_id, spread_bps, liquidity, 0.0)
+                    self.db.insert_audit_event(
+                        level="WARN",
+                        category="market_making",
+                        code="MM_BURST_PAUSE",
+                        message="burst condition paused market making",
+                        context={
+                            "market_id": market_id,
+                            "mid_move_bps_5m": move_bps,
+                            "depth_drop_ratio": depth_drop_ratio,
+                            "hard_burst": hard_burst,
+                            "llm_burst": llm_burst,
+                        },
+                    )
                     continue
 
             snap = self.db.build_risk_snapshot(
@@ -262,7 +457,7 @@ class ChamiClawApp:
             if float(snap.get("position_pct", 0.0) or 0.0) > per_market_expo_pct:
                 _rej("MM_EXPOSURE_BLOCK", market_id, spread_bps, liquidity, 0.0)
                 continue
-            if float(snap.get("cluster_exposure_pct", 0.0) or 0.0) > total_expo_pct:
+            if float(portfolio.get("total_exposure_ratio", 0.0) or 0.0) > total_expo_pct:
                 _rej("MM_EXPOSURE_BLOCK", market_id, spread_bps, liquidity, 0.0)
                 continue
 
@@ -272,28 +467,9 @@ class ChamiClawApp:
                 _rej("MM_OTHER", market_id, spread_bps, liquidity, 0.0)
                 continue
             spread = yes_ask - yes_bid
-            center = (yes_bid + yes_ask) / 2.0
-
-            if use_llm_fair:
-                try:
-                    llm = self.signal_engine.llm1.infer(
-                        market_prob=center,
-                        features={
-                            "depth_imbalance": quote.get("depth_imbalance", 0),
-                            "sigma_5m": quote.get("sigma_5m", 0),
-                        },
-                    )
-                    fair = float(llm.fair_prob)
-                    center = fair
-                    if fair > ((yes_bid + yes_ask) / 2.0):
-                        center += spread * 0.05
-                    elif fair < ((yes_bid + yes_ask) / 2.0):
-                        center -= spread * 0.05
-                except Exception:
-                    pass
-
-            bid_quote = max(0.0, min(1.0, center - spread * 0.15))
-            ask_quote = max(0.0, min(1.0, center + spread * 0.15))
+            center = float(quote.get("yes_mid", (yes_bid + yes_ask) / 2.0) or (yes_bid + yes_ask) / 2.0)
+            bid_quote = max(0.0, min(1.0, center - spread * quote_offset_ratio))
+            ask_quote = max(0.0, min(1.0, center + spread * quote_offset_ratio))
 
             yes_qty = float(snap.get("yes_qty", 0.0) or 0.0)
             no_qty = float(snap.get("no_qty", 0.0) or 0.0)
@@ -311,7 +487,7 @@ class ChamiClawApp:
                 continue
             mm_selected_count += 1
 
-            mm_size = max(10.0, round(min(per_market_cap, total_cap) * 0.001, 2))
+            mm_size = max(10.0, round(min(per_market_cap, total_cap) * 0.001 * size_scale, 2))
             placed_any = False
 
             if allow_buy_yes:
@@ -320,13 +496,22 @@ class ChamiClawApp:
                     "market_id": market_id,
                     "side": "buy_yes",
                     "confidence": 0.55,
-                    "expected_edge_after_costs_bps": 0.0,
+                    "expected_edge_after_costs_bps": max(1.0, spread_bps * 0.20),
+                    "is_add_position": True,
+                    "is_market_making": True,
                 }
                 token_ids = market.get("clob_token_ids") or []
                 if isinstance(token_ids, list) and token_ids:
                     signal_buy_yes["token_id"] = str(token_ids[0])
                 active = dict(ms.get("active_orders", {}) or {})
+                next_requote_at = dict(ms.get("next_requote_at", {}) or {})
                 old_oid = str(active.get("buy_yes") or "")
+                next_due = float(next_requote_at.get("buy_yes", 0.0) or 0.0)
+                if old_oid and now < next_due:
+                    _rej("MM_REQUOTE_WAIT", market_id, spread_bps, liquidity, inventory, side="buy_yes")
+                    ms["active_orders"] = active
+                    ms["next_requote_at"] = next_requote_at
+                    continue
                 if old_oid:
                     c = self.execution.cancel_order(old_oid)
                     if c.status not in {"canceled", "filled", "rejected"}:
@@ -343,10 +528,12 @@ class ChamiClawApp:
                     placed_any = True
                     if res.status in {"submitted", "new", "partial"}:
                         active["buy_yes"] = res.order_id
+                        next_requote_at["buy_yes"] = now + random.uniform(requote_min_sec, max(requote_min_sec, requote_max_sec))
                     else:
                         active["buy_yes"] = ""
+                        next_requote_at["buy_yes"] = 0.0
                     idem_key = f"{res.order_id}:{res.status}"
-                    pnl_class = "win" if res.status == "filled" else "loss"
+                    pnl_class = "loss" if res.status in {"rejected", "canceled"} else "win"
                     inserted = self.db.insert_mm_pnl_event(idem_key, market_id, "buy_yes", res.status, pnl_class)
                     if inserted:
                         if pnl_class == "win":
@@ -354,12 +541,13 @@ class ChamiClawApp:
                         else:
                             ms["loss_streak"] = int(ms.get("loss_streak", 0)) + 1
                     if res.status in {"rejected", "canceled"}:
-                        _rej("MM_EXECUTION_REJECTED", market_id, spread_bps, liquidity, inventory)
+                        _rej("MM_EXECUTION_REJECTED", market_id, spread_bps, liquidity, inventory, side="buy_yes")
                         self._mm_audit_reject(market_id, "buy_yes", bid_quote, mm_size, str(res.reason), None)
                 else:
-                    _rej("MM_EXPOSURE_BLOCK", market_id, spread_bps, liquidity, inventory)
+                    _rej("MM_EXPOSURE_BLOCK", market_id, spread_bps, liquidity, inventory, side="buy_yes")
                     self._mm_audit_reject(market_id, "buy_yes", bid_quote, mm_size, "RISK_REJECT", str(decision.reject_code or "RISK_REJECT"))
                 ms["active_orders"] = active
+                ms["next_requote_at"] = next_requote_at
 
             if allow_buy_no:
                 signal_buy_no = {
@@ -367,13 +555,22 @@ class ChamiClawApp:
                     "market_id": market_id,
                     "side": "buy_no",
                     "confidence": 0.55,
-                    "expected_edge_after_costs_bps": 0.0,
+                    "expected_edge_after_costs_bps": max(1.0, spread_bps * 0.20),
+                    "is_add_position": True,
+                    "is_market_making": True,
                 }
                 token_ids = market.get("clob_token_ids") or []
                 if isinstance(token_ids, list) and len(token_ids) >= 2:
                     signal_buy_no["token_id"] = str(token_ids[1])
                 active = dict(ms.get("active_orders", {}) or {})
+                next_requote_at = dict(ms.get("next_requote_at", {}) or {})
                 old_oid = str(active.get("buy_no") or "")
+                next_due = float(next_requote_at.get("buy_no", 0.0) or 0.0)
+                if old_oid and now < next_due:
+                    _rej("MM_REQUOTE_WAIT", market_id, spread_bps, liquidity, inventory, side="buy_no")
+                    ms["active_orders"] = active
+                    ms["next_requote_at"] = next_requote_at
+                    continue
                 if old_oid:
                     c = self.execution.cancel_order(old_oid)
                     if c.status not in {"canceled", "filled", "rejected"}:
@@ -391,10 +588,12 @@ class ChamiClawApp:
                     placed_any = True
                     if res.status in {"submitted", "new", "partial"}:
                         active["buy_no"] = res.order_id
+                        next_requote_at["buy_no"] = now + random.uniform(requote_min_sec, max(requote_min_sec, requote_max_sec))
                     else:
                         active["buy_no"] = ""
+                        next_requote_at["buy_no"] = 0.0
                     idem_key = f"{res.order_id}:{res.status}"
-                    pnl_class = "win" if res.status == "filled" else "loss"
+                    pnl_class = "loss" if res.status in {"rejected", "canceled"} else "win"
                     inserted = self.db.insert_mm_pnl_event(idem_key, market_id, "buy_no", res.status, pnl_class)
                     if inserted:
                         if pnl_class == "win":
@@ -402,13 +601,14 @@ class ChamiClawApp:
                         else:
                             ms["loss_streak"] = int(ms.get("loss_streak", 0)) + 1
                     if res.status in {"rejected", "canceled"}:
-                        _rej("MM_EXECUTION_REJECTED", market_id, spread_bps, liquidity, inventory)
+                        _rej("MM_EXECUTION_REJECTED", market_id, spread_bps, liquidity, inventory, side="buy_no")
                         self._mm_audit_reject(market_id, "buy_no", no_quote, mm_size, str(res.reason), None)
                 else:
                     no_quote = max(0.0, min(1.0, 1.0 - ask_quote))
-                    _rej("MM_EXPOSURE_BLOCK", market_id, spread_bps, liquidity, inventory)
+                    _rej("MM_EXPOSURE_BLOCK", market_id, spread_bps, liquidity, inventory, side="buy_no")
                     self._mm_audit_reject(market_id, "buy_no", no_quote, mm_size, "RISK_REJECT", str(decision.reject_code or "RISK_REJECT"))
                 ms["active_orders"] = active
+                ms["next_requote_at"] = next_requote_at
 
             if not placed_any:
                 continue
@@ -417,6 +617,23 @@ class ChamiClawApp:
                 ms["paused_until"] = now + pause_min * 60
 
         self._save_mm_state(state)
+        latest_portfolio = self._portfolio_risk_snapshot(quote_by_market_id=quote_by_market_id)
+        if risk_status == "NORMAL" and any_burst_pause:
+            risk_status = "PAUSED_BURST"
+        self.db.insert_audit_event(
+            level="INFO",
+            category="market_making",
+            code="RUN_ONCE_MM_RISK_SUMMARY",
+            message="stable_mm_summary",
+            context={
+                "risk_status": risk_status,
+                "total_inventory": latest_portfolio["total_inventory"],
+                "total_inventory_net": latest_portfolio["total_inventory_net"],
+                "total_exposure_ratio": latest_portfolio["total_exposure_ratio"],
+                "daily_pnl": latest_portfolio["daily_pnl"],
+                "active_mm_markets": sorted(active_mm_markets),
+            },
+        )
         return {
             "executed": True,
             "orders_submitted": int(orders_submitted),
@@ -426,6 +643,11 @@ class ChamiClawApp:
             "mm_selected_count": int(mm_selected_count),
             "mm_reject_counts": mm_reject_counts,
             "mm_sample_rejects": mm_sample_rejects[:5],
+            "total_inventory": float(latest_portfolio["total_inventory"]),
+            "total_inventory_net": float(latest_portfolio["total_inventory_net"]),
+            "total_exposure_ratio": float(latest_portfolio["total_exposure_ratio"]),
+            "daily_pnl": float(latest_portfolio["daily_pnl"]),
+            "risk_status": risk_status,
         }
 
     def compute_edges_after_bbo(
@@ -550,8 +772,12 @@ class ChamiClawApp:
     def run_once(self) -> PipelineResult:
         self._bump_run_stats("run_started")
         state = self.state.load()
+        if self._should_auto_recover_daily_halt(state):
+            self.state.transition("RUNNING", "daily_drawdown_new_day")
+            state = self.state.load()
         if state.state == "HALTED":
             self.logger.log("SYSTEM_HALTED", reason=state.reason)
+            snap = self._portfolio_risk_snapshot()
             self._bump_run_stats("run_completed")
             return PipelineResult(
                 scanned_markets=0,
@@ -559,21 +785,11 @@ class ChamiClawApp:
                 signals_generated=0,
                 orders_submitted=0,
                 signal_drop_counts={},
-                max_raw_edge_bps=0.0,
-                min_spread_bps=0.0,
-                structural_signal_counts={"pair_cost_hit": 0, "cross_market_hit": 0, "term_structure_hit": 0},
-                bbo_markets=0,
-                top_edge_market_debug={},
-                edge_calc_attempted=0,
-                edge_calc_success=0,
-                edge_calc_failed=0,
-                edge_calc_skipped=0,
-                edge_calc_errors=[],
-                p50_edge_bps=0.0,
-                p90_edge_bps=0.0,
-                p99_edge_bps=0.0,
-                max_edge_bps=0.0,
-                top3_edges=[],
+                total_inventory=float(snap["total_inventory"]),
+                total_inventory_net=float(snap["total_inventory_net"]),
+                total_exposure_ratio=float(snap["total_exposure_ratio"]),
+                daily_pnl=float(snap["daily_pnl"]),
+                risk_status="HALTED",
             )
 
         cycle_started = time.time()
@@ -643,9 +859,10 @@ class ChamiClawApp:
         missing_no_bid = 0
         missing_no_ask = 0
         orderbook_calls = 0
-        orderbook_budget = int(self.config.get("scan", {}).get("max_orderbook_calls_per_cycle", 40))
-        orderbook_for_tradable_only = bool(self.config.get("scan", {}).get("orderbook_for_tradable_only", True))
-        enable_orderbook = bool(self.config.get("scan", {}).get("enable_orderbook", True))
+        scan_cfg = self.config.get("scan", {})
+        orderbook_budget = int(scan_cfg.get("max_orderbook_calls_per_cycle", 40))
+        orderbook_for_tradable_only = bool(scan_cfg.get("orderbook_for_tradable_only", True))
+        enable_orderbook = bool(scan_cfg.get("enable_orderbook", True))
         reject_counts: dict[str, int] = {}
         top_signal_edges: list[float] = []
         arbitrage_markets: set[str] = set()
@@ -787,8 +1004,41 @@ class ChamiClawApp:
                 quotes_written += 1
                 bbo_markets += 1
                 bbo_market_ids.append(market["market_id"])
+        allow_mid_quote_fallback = bool(
+            scan_cfg.get("allow_mid_quote_fallback", bool(self.config.get("execution", {}).get("dry_run", False)))
+        )
+        fallback_spread_bps = float(scan_cfg.get("fallback_spread_bps", 40.0))
+        if allow_mid_quote_fallback:
+            half_spread = max(0.0, fallback_spread_bps) / 10_000.0 / 2.0
+            for market in markets:
+                market_id = str(market.get("market_id") or "")
+                if not market_id or market_id in quote_by_market_id:
+                    continue
+                prices = market.get("outcome_prices") or []
+                if not isinstance(prices, (list, tuple)) or len(prices) < 2:
+                    continue
+                try:
+                    yes_mid = float(prices[0])
+                    no_mid = float(prices[1])
+                except (TypeError, ValueError):
+                    continue
+                orderbook = {
+                    "yes_bid": max(0.0, min(1.0, yes_mid - half_spread)),
+                    "yes_ask": max(0.0, min(1.0, yes_mid + half_spread)),
+                    "no_bid": max(0.0, min(1.0, no_mid - half_spread)),
+                    "no_ask": max(0.0, min(1.0, no_mid + half_spread)),
+                    "depth_usd": float(market.get("liquidity_usd", 0.0) or 0.0),
+                }
+                recent = self.db.get_last_quotes(market_id, limit=20)
+                recent_yes = [float(x.get("yes_mid", 0.0) or 0.0) for x in reversed(recent)]
+                quote = build_quote(market, recent_yes, orderbook=orderbook)
+                self.db.insert_quote(quote)
+                quote_by_market_id[market_id] = quote
+                quotes_written += 1
+                bbo_markets += 1
+                bbo_market_ids.append(market_id)
         bbo_full_threshold = int(min(30, max(1, int(len(markets) * 0.2))))
-        bbo_signal_min = int(self.config.get("scan", {}).get("min_bbo_for_signal_stage", 15))
+        bbo_signal_min = int(scan_cfg.get("min_bbo_for_signal_stage", min(15, max(1, len(markets)))))
 
         if bbo_markets < bbo_signal_min:
             missing_counts = {
@@ -869,10 +1119,23 @@ class ChamiClawApp:
             raise RuntimeError("EDGE_STAGE_NOT_EXECUTED")
 
         enable_cross_term = bbo_markets >= bbo_full_threshold
+        mm_result = self._run_market_making_mode(
+            markets=markets,
+            quote_by_market_id=quote_by_market_id,
+            arbitrage_markets=arbitrage_markets,
+        )
+        if not bool(mm_result.get("executed", False)):
+            raise RuntimeError("MM_STAGE_NOT_RUN")
+        orders_submitted += int(mm_result.get("orders_submitted", 0))
+        mm_risk_status = str(mm_result.get("risk_status", "NORMAL"))
+        arb_max_orders = int(self.config.get("market_making", {}).get("arb_max_orders_per_cycle", 1))
+        arb_orders_submitted = 0
 
         # Phase 2: signal generation + risk + execution.
         phase2_started = time.time()
         for market in markets:
+            if mm_risk_status == "HALTED":
+                break
             if time.time() - cycle_started > max_cycle_sec:
                 self.db.insert_audit_event(
                     level="WARN",
@@ -902,16 +1165,26 @@ class ChamiClawApp:
                 event_id=market.get("event_id"),
             )
             debug: dict[str, Any] = {}
-            signal = self.signal_engine.generate(
-                market=market,
-                quote=quote,
-                strategy_version="v0.1.0",
-                peer_markets=peers,
-                peer_quotes_by_market_id=quote_by_market_id,
-                debug=debug,
-                enable_cross_market_signal=enable_cross_term,
-                enable_term_structure_signal=enable_cross_term,
-            )
+            try:
+                signal = self.signal_engine.generate(
+                    market=market,
+                    quote=quote,
+                    strategy_version="v0.1.0",
+                    peer_markets=peers,
+                    peer_quotes_by_market_id=quote_by_market_id,
+                    debug=debug,
+                    enable_cross_market_signal=enable_cross_term,
+                    enable_term_structure_signal=enable_cross_term,
+                )
+            except TypeError:
+                # Backward compatibility for monkeypatched tests/stubs with old signature.
+                signal = self.signal_engine.generate(
+                    market=market,
+                    quote=quote,
+                    strategy_version="v0.1.0",
+                    peer_markets=peers,
+                    debug=debug,
+                )
             if debug.get("cross_market_hit"):
                 structural_signal_counts["cross_market_hit"] += 1
             if debug.get("term_structure_hit"):
@@ -959,6 +1232,15 @@ class ChamiClawApp:
             if bool(signal.get("model_degraded", False)):
                 llm_degraded_signals += 1
 
+            signal_type = str(signal.get("signal_type", ""))
+            if signal_type not in {"pair_cost_arb", "cross_market_divergence", "term_structure_inversion"}:
+                continue
+            arb_min_edge_bps = float(self.config.get("market_making", {}).get("arb_min_edge_bps", 200))
+            if float(signal.get("expected_edge_after_costs_bps", 0.0) or 0.0) < arb_min_edge_bps:
+                continue
+            if arb_orders_submitted >= max(0, arb_max_orders):
+                continue
+
             token_ids = market.get("clob_token_ids") or []
             if isinstance(token_ids, list) and token_ids:
                 if signal.get("side") == "buy_no" and len(token_ids) >= 2:
@@ -967,11 +1249,6 @@ class ChamiClawApp:
                     signal["token_id"] = str(token_ids[0])
 
             arbitrage_markets.add(str(signal.get("market_id")))
-            mm_state_now = self._load_mm_state()
-            self._mm_cancel_market_orders(str(signal.get("market_id")), mm_state_now)
-            ms_now = mm_state_now.setdefault("markets", {}).setdefault(str(signal.get("market_id")), {"loss_streak": 0, "paused_until": 0.0, "active_orders": {}})
-            ms_now["paused_until"] = time.time() + float(self.config.get("market_making", {}).get("mm_cooldown_sec", 60))
-            self._save_mm_state(mm_state_now)
             self.db.insert_signal(signal)
             for pred in signal.get("predictions", []):
                 self.db.insert_prediction(signal["signal_id"], pred)
@@ -1090,6 +1367,7 @@ class ChamiClawApp:
             )
             self.db.insert_order(order)
             orders_submitted += 1
+            arb_orders_submitted += 1
             if order_res.status in {"rejected", "canceled"}:
                 reject_counts[str(order_res.reason)] = reject_counts.get(str(order_res.reason), 0) + 1
             emit_signal_decision(
@@ -1137,7 +1415,9 @@ class ChamiClawApp:
         timing_ms["total"] = int((time.time() - cycle_started) * 1000)
 
         llm_pause_threshold = int(self.config.get("ops", {}).get("llm_degrade_pause_threshold", 999999))
-        if llm_degraded_signals >= llm_pause_threshold:
+        if mm_risk_status == "HALTED":
+            self.state.transition("HALTED", "RISK_HALT_DAILY_DRAWDOWN")
+        elif llm_degraded_signals >= llm_pause_threshold:
             self.state.transition("PAUSED", "llm_degraded_threshold")
             self.db.insert_audit_event(
                 level="WARN",
@@ -1185,15 +1465,6 @@ class ChamiClawApp:
             normalized["OTHER"] = int(sum(v for k, v in reject_counts.items() if k not in summary_keys))
             emit_reject_summary(self.logger, normalized)
 
-        mm_result = self._run_market_making_mode(
-            markets=markets,
-            quote_by_market_id=quote_by_market_id,
-            arbitrage_markets=arbitrage_markets,
-        )
-        if not bool(mm_result.get("executed", False)):
-            raise RuntimeError("MM_STAGE_NOT_RUN")
-        orders_submitted += int(mm_result.get("orders_submitted", 0))
-
         self._bump_run_stats("run_completed")
         return PipelineResult(
             scanned_markets=len(markets),
@@ -1225,4 +1496,9 @@ class ChamiClawApp:
             mm_selected_count=int(mm_result.get("mm_selected_count", 0)),
             mm_reject_counts=dict(mm_result.get("mm_reject_counts", {})),
             mm_sample_rejects=list(mm_result.get("mm_sample_rejects", [])),
+            total_inventory=float(mm_result.get("total_inventory", 0.0)),
+            total_inventory_net=float(mm_result.get("total_inventory_net", 0.0)),
+            total_exposure_ratio=float(mm_result.get("total_exposure_ratio", 0.0)),
+            daily_pnl=float(mm_result.get("daily_pnl", 0.0)),
+            risk_status=str(mm_result.get("risk_status", "NORMAL")),
         )

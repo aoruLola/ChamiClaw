@@ -55,12 +55,13 @@
   },
   "risk": {
     "account_equity_usd": 10000,
-    "per_market_pos_pct": 0.015,
-    "event_cluster_exposure_pct": 0.1,
-    "daily_max_drawdown_pct": 0.04,
+    "per_market_pos_pct": 0.03,
+    "event_cluster_exposure_pct": 0.2,
+    "daily_max_drawdown_pct": 0.05,
     "max_spread_bps": 120,
-    "pre_expiry_add_position_block_min": 120,
-    "max_open_orders_per_market": 1
+    "pre_expiry_add_position_block_min": 1440,
+    "max_open_orders_per_market": 1,
+    "forbid_directional_add": true
   },
   "execution": {
     "backend": "py-clob-client",
@@ -87,6 +88,34 @@
   "ops": {
     "discord_webhook": "",
     "llm_degrade_pause_threshold": 5
+  },
+  "market_making": {
+    "enabled": true,
+    "baseline_mode": true,
+    "min_spread_bps": 40,
+    "min_market_liquidity_usd": 100000,
+    "min_time_to_expiry_min": 1440,
+    "quote_offset_ratio": 0.2,
+    "inventory_threshold_pct": 0.02,
+    "per_market_exposure_pct": 0.03,
+    "total_exposure_pct": 0.2,
+    "pause_after_consecutive_losses": 2,
+    "pause_minutes": 30,
+    "mm_cooldown_sec": 60,
+    "mid_move_pause_bps_5m": 120,
+    "mid_move_pause_hard_bps_5m": 180,
+    "depth_drop_ratio_warn": 0.5,
+    "depth_drop_ratio_hard": 0.7,
+    "requote_min_sec": 30,
+    "requote_max_sec": 60,
+    "drawdown_throttle_pct": 0.03,
+    "drawdown_throttle_scale": 0.5,
+    "drawdown_halt_pct": 0.05,
+    "burst_llm_enabled": true,
+    "burst_llm_confidence_min": 0.65,
+    "arb_max_orders_per_cycle": 1,
+    "arb_min_edge_bps": 200,
+    "use_llm_fair_prob": false
   },
   "reconcile": {
     "interval_sec": 300,

@@ -136,6 +136,11 @@ def parse_orderbook_response(payload: Any, field_map: dict[str, Any] | None = No
 
     price_aliases = _aliases(field_map, "price", ["price", "px"])
     size_aliases = _aliases(field_map, "size", ["size", "quantity", "qty"])
+    container_aliases = _aliases(field_map, "container", ["orderbook", "book"])
+    yes_bids_aliases = _aliases(field_map, "yes_bids", ["yes_bids", "bids"])
+    yes_asks_aliases = _aliases(field_map, "yes_asks", ["yes_asks", "asks"])
+    no_bids_aliases = _aliases(field_map, "no_bids", ["no_bids"])
+    no_asks_aliases = _aliases(field_map, "no_asks", ["no_asks"])
 
     def _best_bid(levels: list[Any]) -> float | None:
         vals = [_level_price_size(x, price_aliases, size_aliases)[0] for x in levels]
@@ -157,12 +162,14 @@ def parse_orderbook_response(payload: Any, field_map: dict[str, Any] | None = No
     # container compatibility
     yes_book = book.get("yesBook") or book.get("yes_book") or {}
     no_book = book.get("noBook") or book.get("no_book") or {}
-    orderbook = book.get("orderbook") or book.get("book") or book
+    orderbook = _first_value(book, container_aliases, None)
+    if not isinstance(orderbook, dict):
+        orderbook = book.get("orderbook") or book.get("book") or book
 
-    yes_bids = _extract_levels(yes_book if isinstance(yes_book, dict) else {}, ["bids"]) or _extract_levels(orderbook if isinstance(orderbook, dict) else {}, ["yes_bids", "bids"])
-    yes_asks = _extract_levels(yes_book if isinstance(yes_book, dict) else {}, ["asks"]) or _extract_levels(orderbook if isinstance(orderbook, dict) else {}, ["yes_asks", "asks"])
-    no_bids = _extract_levels(no_book if isinstance(no_book, dict) else {}, ["bids"]) or _extract_levels(orderbook if isinstance(orderbook, dict) else {}, ["no_bids"])
-    no_asks = _extract_levels(no_book if isinstance(no_book, dict) else {}, ["asks"]) or _extract_levels(orderbook if isinstance(orderbook, dict) else {}, ["no_asks"])
+    yes_bids = _extract_levels(yes_book if isinstance(yes_book, dict) else {}, ["bids"]) or _extract_levels(orderbook if isinstance(orderbook, dict) else {}, yes_bids_aliases)
+    yes_asks = _extract_levels(yes_book if isinstance(yes_book, dict) else {}, ["asks"]) or _extract_levels(orderbook if isinstance(orderbook, dict) else {}, yes_asks_aliases)
+    no_bids = _extract_levels(no_book if isinstance(no_book, dict) else {}, ["bids"]) or _extract_levels(orderbook if isinstance(orderbook, dict) else {}, no_bids_aliases)
+    no_asks = _extract_levels(no_book if isinstance(no_book, dict) else {}, ["asks"]) or _extract_levels(orderbook if isinstance(orderbook, dict) else {}, no_asks_aliases)
 
     if yes_bid is None:
         yes_bid = _best_bid(yes_bids)

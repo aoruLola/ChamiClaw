@@ -21,7 +21,7 @@ def estimate_cost_bps(config: dict[str, Any], quote: dict[str, Any]) -> CostBrea
 
     base_slippage_bps = float(signal_cfg.get("slippage_bps", 0.0))
     assumed_notional_usd = float(signal_cfg.get("assumed_order_notional_usd", 100.0))
-    depth_usd = max(1.0, float(quote.get("depth_usd") or 0.0))
+    depth_usd = max(1.0, float(quote.get("depth_usd") or assumed_notional_usd))
     depth_multiplier = max(1.0, assumed_notional_usd / depth_usd)
     slippage_bps = base_slippage_bps * depth_multiplier
 

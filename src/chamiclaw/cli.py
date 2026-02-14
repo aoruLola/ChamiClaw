@@ -61,6 +61,9 @@ def cmd_run_once(config: str) -> None:
             "signals_generated": result.signals_generated,
             "orders_submitted": result.orders_submitted,
             "signal_drop_counts": result.signal_drop_counts,
+            "risk_status": result.risk_status,
+            "total_exposure_ratio": result.total_exposure_ratio,
+            "daily_pnl": result.daily_pnl,
         },
     )
     if result.signal_drop_counts.get("DATA_INSUFFICIENT_MISSING_BBO", 0) > 0:
@@ -79,6 +82,12 @@ def cmd_run_once(config: str) -> None:
                 {
                     "scanned_markets": result.scanned_markets,
                     "bbo_markets": result.bbo_markets,
+                    "active_mm_markets": result.active_mm_markets,
+                    "total_inventory": result.total_inventory,
+                    "total_inventory_net": result.total_inventory_net,
+                    "total_exposure_ratio": result.total_exposure_ratio,
+                    "daily_pnl": result.daily_pnl,
+                    "risk_status": result.risk_status,
                     "missing_counts": ctx.get("missing_counts", {}),
                     "last_orderbook_errors": ctx.get("last_orderbook_errors", []),
                     "sample_raw_payload_keys": ctx.get("sample_raw_payload_keys", {}),
@@ -118,6 +127,11 @@ def cmd_run_once(config: str) -> None:
             "mm_selected_count": result.mm_selected_count,
             "mm_reject_counts": result.mm_reject_counts,
             "mm_sample_rejects": result.mm_sample_rejects,
+            "total_inventory": result.total_inventory,
+            "total_inventory_net": result.total_inventory_net,
+            "total_exposure_ratio": result.total_exposure_ratio,
+            "daily_pnl": result.daily_pnl,
+            "risk_status": result.risk_status,
             "dry_run": cfg["execution"].get("dry_run", True),
             "signal_drop_counts": result.signal_drop_counts,
         },
@@ -134,7 +148,9 @@ def cmd_run_loop(config: str) -> None:
         result = app_obj.run_once()
         print(
             f"scan={result.scanned_markets} quotes={result.quotes_written} "
-            f"signals={result.signals_generated} orders={result.orders_submitted}"
+            f"signals={result.signals_generated} orders={result.orders_submitted} "
+            f"mm={len(result.active_mm_markets)} exposure={result.total_exposure_ratio:.4f} "
+            f"daily_pnl={result.daily_pnl:.2f} risk={result.risk_status}"
         )
         time.sleep(interval)
 
@@ -236,6 +252,13 @@ def cmd_doctor(config: str) -> None:
 def cmd_state() -> None:
     sm = SystemStateMachine()
     s = sm.load()
+    print(json.dumps({"state": s.state, "reason": s.reason, "updated_at_utc": s.updated_at_utc}, ensure_ascii=True))
+
+
+def cmd_state_set(state: str, reason: str) -> None:
+    target = str(state or "RUNNING").strip().upper()
+    sm = SystemStateMachine()
+    s = sm.transition(target, str(reason or "manual_override"))
     print(json.dumps({"state": s.state, "reason": s.reason, "updated_at_utc": s.updated_at_utc}, ensure_ascii=True))
 
 
@@ -551,6 +574,7 @@ def build_parser() -> argparse.ArgumentParser:
             "calibrate",
             "doctor",
             "state",
+            "state-set",
             "llm-fallback-check",
             "go-no-go",
             "validate-go-no-go",
@@ -585,6 +609,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fallback-iterations", default=50, type=int, help="Fallback probe iterations for validate-go-no-go")
     p.add_argument("--require-go-streak", default=3, type=int, help="Required GO streak for validate-go-no-go")
     p.add_argument("--output", default="reports/go_no_go_validation.json", help="Output path for validate-go-no-go report")
+    p.add_argument("--state", default="RUNNING", choices=["RUNNING", "PAUSED", "HALTED"], help="Target state for state-set command")
+    p.add_argument("--reason", default="manual_override", help="State transition reason for state-set command")
     p.add_argument("--enter-grid", default="80,120,200", help="Comma-separated llm_enter_edge_bps grid for threshold-grid")
     p.add_argument("--confidence-grid", default="0.55,0.62,0.70", help="Comma-separated min_confidence grid for threshold-grid")
     p.add_argument("--market-limit", default=200, type=int, help="Max tradable markets for threshold-grid")
@@ -613,6 +639,8 @@ def main() -> None:
         cmd_doctor(args.config)
     elif cmd == "state":
         cmd_state()
+    elif cmd == "state-set":
+        cmd_state_set(args.state, args.reason)
     elif cmd == "llm-fallback-check":
         cmd_llm_fallback_check(args.config, args.iterations)
     elif cmd == "go-no-go":

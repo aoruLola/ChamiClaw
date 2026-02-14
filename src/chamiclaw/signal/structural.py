@@ -59,10 +59,21 @@ def calc_pair_cost_edge_bps(yes_bid_raw: Any, yes_ask_raw: Any, no_bid_raw: Any,
 def detect_pair_cost_signal(
     yes_bid: float,
     yes_ask: float,
-    no_bid: float,
-    no_ask: float,
-    enter_edge_bps: float,
+    no_bid: float | None = None,
+    no_ask: float | None = None,
+    enter_edge_bps: float | None = None,
 ) -> StructuralResult | None:
+    # Backward compatibility:
+    # old call style was detect_pair_cost_signal(yes_mid, no_mid, enter_edge_bps)
+    if no_ask is None and enter_edge_bps is None and no_bid is not None:
+        enter_edge_bps = float(no_bid)
+        no_bid = float(yes_ask)
+        no_ask = float(yes_ask)
+        yes_ask = float(yes_bid)
+    if no_bid is None or no_ask is None:
+        return None
+    if enter_edge_bps is None:
+        enter_edge_bps = 0.0
     calc = calc_pair_cost_edge_bps(yes_bid, yes_ask, no_bid, no_ask)
     pair_cost_edge_bps = float(calc["raw_edge_bps"])
     if not bool(calc.get("pair_sum_valid", False)):

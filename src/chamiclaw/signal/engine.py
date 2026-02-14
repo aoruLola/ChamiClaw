@@ -38,23 +38,25 @@ class SignalEngine:
         yes_mid = float(quote["yes_mid"])
         no_mid = float(quote["no_mid"])
         market_prob = yes_mid
+        spread_bps = float(quote.get("spread_bps", 0.0) or 0.0)
+
+        yes_bid = quote.get("yes_bid")
+        yes_ask = quote.get("yes_ask")
+        no_bid = quote.get("no_bid")
+        no_ask = quote.get("no_ask")
+        if any(v is None for v in (yes_bid, yes_ask, no_bid, no_ask)):
+            # Compatibility fallback: derive synthetic BBO from mids and spread.
+            half_spread_prob = max(0.0, spread_bps) / 10_000.0 / 2.0
+            yes_bid = max(0.0, min(1.0, yes_mid - half_spread_prob))
+            yes_ask = max(0.0, min(1.0, yes_mid + half_spread_prob))
+            no_bid = max(0.0, min(1.0, no_mid - half_spread_prob))
+            no_ask = max(0.0, min(1.0, no_mid + half_spread_prob))
 
         peers = peer_markets or []
         peer_quotes_map = peer_quotes_by_market_id or {}
         structural_candidates = []
-        pair_calc = calc_pair_cost_edge_bps(
-            quote.get("yes_bid"),
-            quote.get("yes_ask"),
-            quote.get("no_bid"),
-            quote.get("no_ask"),
-        )
-        pair = detect_pair_cost_signal(
-            quote.get("yes_bid"),
-            quote.get("yes_ask"),
-            quote.get("no_bid"),
-            quote.get("no_ask"),
-            float(self.config["signal"].get("enter_edge_bps", 180)),
-        )
+        pair_calc = calc_pair_cost_edge_bps(yes_bid, yes_ask, no_bid, no_ask)
+        pair = detect_pair_cost_signal(yes_bid, yes_ask, no_bid, no_ask, float(self.config["signal"].get("enter_edge_bps", 180)))
         pair_hit = pair is not None
         if pair_hit:
             structural_candidates.append(pair)
@@ -165,71 +167,71 @@ class SignalEngine:
         if structural is not None:
             edge_bps_raw = float(structural.edge_bps)
         costs = estimate_cost_bps(self.config, quote)
-        spread_bps = float(quote.get("spread_bps", 0.0))
-        expected_edge_after_costs_bps = edge_bps_raw - 200.0 - 40.0 - (spread_bps / 2.0)
-
         signal_cfg = self.config.get("signal", {})
         min_confidence = float(signal_cfg.get("live_min_confidence", signal_cfg.get("min_confidence", 0.60)))
-        confidence = min(p["confidence"] for p in predictions if p["confidence"] is not None)
+        confidence_values = [float(p["confidence"]) for p in predictions if p.get("confidence") is not None and p.get("model_name") != "llm_error"]
+        if confidence_values:
+            confidence = min(confidence_values)
+        elif structural is not None:
+            confidence = min_confidence
+        else:
+            confidence = 0.0
 
+        signal_type = structural.signal_type if structural else "llm_edge"
+        side = structural.side if structural else ("buy_yes" if edge_bps_raw > 0 else "buy_no")
+        edge_bps_abs = abs(float(edge_bps_raw))
+        raw_edge_threshold = float(signal_cfg.get("enter_edge_bps", 280))
         if structural is None:
-            if debug is not None:
-                has_bbo = all(quote.get(k) is not None for k in ("yes_bid", "yes_ask", "no_bid", "no_ask"))
-                if not has_bbo:
-                    reason = "DATA_INSUFFICIENT_MISSING_BBO"
-                elif not bool(debug.get("pair_cost_hit", False)):
-                    reason = "PAIR_COST_NOT_MET"
-                elif len(peers) == 0:
-                    reason = "DATA_INSUFFICIENT_CROSS"
-                elif not bool(debug.get("cross_market_hit", False)):
-                    reason = "CROSS_MARKET_NOT_MET"
-                elif market.get("end_time_utc") is None:
-                    reason = "DATA_INSUFFICIENT_TERM"
-                elif not bool(debug.get("term_structure_hit", False)):
-                    reason = "TERM_STRUCTURE_NOT_MET"
-                else:
-                    reason = "NO_STRUCTURAL_SIGNAL"
-                debug["drop_reason"] = reason
-                debug["drop_category"] = "policy"
-                debug["raw_edge_bps"] = edge_bps_raw
-                debug["expected_edge_after_costs_bps"] = expected_edge_after_costs_bps
-            return None
+            raw_edge_threshold = float(signal_cfg.get("llm_enter_edge_bps", raw_edge_threshold))
+        expected_edge_after_costs_bps = edge_bps_abs - float(costs.total_bps)
+        min_net_edge_bps = float(signal_cfg.get("min_net_edge_bps", 0.0))
+        max_spread_bps = float(signal_cfg.get("max_spread_bps", 280))
 
-        if float(edge_bps_raw) < float(signal_cfg.get("enter_edge_bps", 280)):
+        if edge_bps_abs < raw_edge_threshold:
             if debug is not None:
                 debug["drop_reason"] = "RAW_EDGE_BELOW_THRESHOLD"
                 debug["drop_category"] = "edge"
-                debug["raw_edge_bps"] = edge_bps_raw
-                debug["threshold_bps"] = float(signal_cfg.get("enter_edge_bps", 280))
+                debug["raw_edge_bps"] = edge_bps_abs
+                debug["threshold_bps"] = raw_edge_threshold
+                debug["cost_breakdown"] = {
+                    "fee_bps": float(costs.fee_bps),
+                    "slippage_bps": float(costs.slippage_bps),
+                    "chain_bps": float(costs.chain_bps),
+                    "total_bps": float(costs.total_bps),
+                }
             return None
 
-        if expected_edge_after_costs_bps < 120:
+        if expected_edge_after_costs_bps < min_net_edge_bps:
             if debug is not None:
                 debug["drop_reason"] = "NET_EDGE_TOO_LOW"
                 debug["drop_category"] = "cost"
                 debug["expected_edge_after_costs_bps"] = expected_edge_after_costs_bps
-                debug["threshold_bps"] = 120
+                debug["threshold_bps"] = min_net_edge_bps
+                debug["cost_breakdown"] = {
+                    "fee_bps": float(costs.fee_bps),
+                    "slippage_bps": float(costs.slippage_bps),
+                    "chain_bps": float(costs.chain_bps),
+                    "total_bps": float(costs.total_bps),
+                }
             return None
 
-        if spread_bps > 280:
+        if spread_bps > max_spread_bps:
             if debug is not None:
                 debug["drop_reason"] = "SPREAD_TOO_WIDE"
                 debug["drop_category"] = "risk"
                 debug["spread_bps"] = spread_bps
-                debug["threshold_bps"] = 280
+                debug["threshold_bps"] = max_spread_bps
             return None
 
-        if confidence < 0.60:
+        if confidence < min_confidence:
             if debug is not None:
                 debug["drop_reason"] = "LLM_CONFIDENCE_LOW"
                 debug["drop_category"] = "confidence"
                 debug["confidence"] = confidence
-                debug["min_confidence"] = 0.60
+                debug["min_confidence"] = min_confidence
             return None
 
-        signal_type = structural.signal_type if structural else "llm_edge"
-        side = structural.side if structural else ("buy_yes" if edge_bps_raw > 0 else "buy_no")
-        edge_bps = structural.edge_bps if structural else edge_bps_raw
+        edge_bps = structural.edge_bps if structural else edge_bps_abs
         reason = structural.reason if structural else (llm2.rationale if llm2 else "llm_unavailable")
         if model_degraded:
             reason = f"{reason} | llm_degraded"
@@ -256,10 +258,10 @@ class SignalEngine:
             "status": "generated",
             "created_at_utc": created_at,
             "cost_breakdown": {
-                "fee_bps": 200.0,
-                "slippage_bps": 40.0,
-                "chain_bps": float(spread_bps / 2.0),
-                "total_bps": float(200.0 + 40.0 + (spread_bps / 2.0)),
+                "fee_bps": float(costs.fee_bps),
+                "slippage_bps": float(costs.slippage_bps),
+                "chain_bps": float(costs.chain_bps),
+                "total_bps": float(costs.total_bps),
             },
             "predictions": predictions,
             "model_degraded": model_degraded,
