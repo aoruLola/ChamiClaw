@@ -32,7 +32,7 @@
   - `RAW_EDGE_BELOW_THRESHOLD=7`
 - 已完成一版 reachability 修复：research 模式阈值放松（仅 dry-run 生效），信号由 0 提升到可产出（稳定 2 条/轮左右）。
 - Go/No-Go 已升级并通过最新验证（在研究策略门槛下）：`final_verdict=GO`。
-- 新增 `live-readiness` 预检命令，用于阻断“研究模式 GO 误判为可实盘”。
+- 新增 `live-readiness` 与 `deploy-readiness` 预检命令，用于阻断“研究模式 GO 误判为可实盘”，并输出部署闸门报告。
 - 执行层新增 live precheck 拦截：若缺 `CLOB_API_KEY` / 非 `execution` 角色 / 端点不完整，将拒单而不是盲目尝试实盘请求。
 - 新增循环预算保护（signal/execution 阶段）+ `RUN_ONCE_TIMING` 审计记录，降低 watchdog SIGKILL 风险并可定位慢阶段。
 - 新增 LLM 降级熔断：单周期降级信号超过阈值将自动 `PAUSED`（`ops.llm_degrade_pause_threshold`）。

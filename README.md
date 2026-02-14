@@ -52,6 +52,8 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - `validate-go-no-go`
 - `threshold-grid`
 - `alert-test`
+- `live-readiness`
+- `deploy-readiness`
 - `drill` (failure drill: `api-failure|reconcile-mismatch|drawdown-limit`, default dry-run)
 
 ## Notes

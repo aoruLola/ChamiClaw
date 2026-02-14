@@ -22,6 +22,7 @@ from chamiclaw.ops.go_no_go_validation import (
     run_go_no_go_validation,
     run_llm_fallback_probe,
 )
+from chamiclaw.ops.deploy_readiness import build_deploy_readiness_report
 from chamiclaw.reconcile.engine import ReconcileEngine
 from chamiclaw.settings import load_settings
 from chamiclaw.utils.json_logger import JsonLogger
@@ -389,66 +390,17 @@ def cmd_alert_test(message: str, level: str) -> None:
 
 def cmd_live_readiness(config: str) -> None:
     cfg, db, _ = _build_app(config)
-    snapshot = db.get_go_no_go_snapshot()
-    policy = dict(cfg.get("go_no_go", {}) or {})
-    gng = build_go_no_go_payload(snapshot, policy=policy)
+    report = build_deploy_readiness_report(cfg, db.get_go_no_go_snapshot())
+    print(json.dumps(report, ensure_ascii=True))
 
-    failures: list[str] = []
-    warnings: list[str] = []
 
-    execution_cfg = cfg.get("execution", {})
-    llm_cfg = cfg.get("llm", {})
-    apis_cfg = cfg.get("apis", {})
-    reconcile_cfg = cfg.get("reconcile", {})
-
-    if bool(execution_cfg.get("dry_run", True)):
-        failures.append("execution.dry_run=true")
-
-    if str(llm_cfg.get("mode", "mock")).strip().lower() != "http":
-        failures.append("llm.mode!=http")
-
-    if not str(llm_cfg.get("llm1_endpoint", "")).strip():
-        failures.append("llm1_endpoint_missing")
-    if not str(llm_cfg.get("llm2_endpoint", "")).strip():
-        failures.append("llm2_endpoint_missing")
-
-    if not str(apis_cfg.get("clob_base", "")).strip():
-        failures.append("apis.clob_base_missing")
-
-    if not str(reconcile_cfg.get("exchange_positions_endpoint", "")).strip():
-        warnings.append("reconcile.exchange_positions_endpoint_missing")
-
-    role = get_secret_access_snapshot().role
-    if role != "execution":
-        failures.append("runtime_role_not_execution")
-
-    if not os.getenv("CLOB_API_KEY", "").strip():
-        failures.append("env.CLOB_API_KEY_missing")
-
-    llm_api_env = str(llm_cfg.get("api_key_env", "CHAMICLAW_LLM_API_KEY"))
-    if not os.getenv(llm_api_env, "").strip():
-        warnings.append(f"env.{llm_api_env}_missing")
-
-    if gng.get("verdict") != "GO":
-        failures.append("go_no_go_verdict_not_go")
-
-    live_ready = len(failures) == 0
-    print(
-        json.dumps(
-            {
-                "live_ready": live_ready,
-                "failures": failures,
-                "warnings": warnings,
-                "go_no_go": {
-                    "verdict": gng.get("verdict"),
-                    "flow_verdict": gng.get("flow_verdict"),
-                    "trading_verdict": gng.get("trading_verdict"),
-                    "blockers": gng.get("blockers", []),
-                },
-            },
-            ensure_ascii=True,
-        )
-    )
+def cmd_deploy_readiness(config: str, output: str) -> None:
+    cfg, db, _ = _build_app(config)
+    report = build_deploy_readiness_report(cfg, db.get_go_no_go_snapshot())
+    out = Path(output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, ensure_ascii=True, indent=2), encoding="utf-8")
+    print(json.dumps({"output_path": output, "deploy_ready": report["deploy_ready"], "failures": report["failures"]}, ensure_ascii=True))
 
 
 def cmd_drill(scenario: str, apply_state: bool) -> None:
@@ -506,6 +458,7 @@ def build_parser() -> argparse.ArgumentParser:
             "report",
             "alert-test",
             "live-readiness",
+            "deploy-readiness",
             "drill",
         ],
     )
@@ -585,6 +538,8 @@ def main() -> None:
         cmd_alert_test(args.message, args.level)
     elif cmd == "live-readiness":
         cmd_live_readiness(args.config)
+    elif cmd == "deploy-readiness":
+        cmd_deploy_readiness(args.config, args.output)
     elif cmd == "drill":
         cmd_drill(args.scenario, args.apply_state)
 
