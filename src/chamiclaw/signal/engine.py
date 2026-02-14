@@ -132,10 +132,14 @@ class SignalEngine:
         costs = estimate_cost_bps(self.config, quote)
         expected_edge_after_costs_bps = edge_bps_raw - costs.total_bps
 
-        if structural is None and llm2 is not None and expected_edge_after_costs_bps < self.config["signal"]["enter_edge_bps"]:
+        llm_enter_threshold_bps = float(
+            self.config["signal"].get("llm_enter_edge_bps", self.config["signal"]["enter_edge_bps"])
+        )
+        if structural is None and llm2 is not None and expected_edge_after_costs_bps < llm_enter_threshold_bps:
             if debug is not None:
                 debug["drop_reason"] = "EDGE_BELOW_ENTER_THRESHOLD"
                 debug["expected_edge_after_costs_bps"] = expected_edge_after_costs_bps
+                debug["threshold_bps"] = llm_enter_threshold_bps
             return None
 
         confidence = min(p["confidence"] for p in predictions if p["confidence"] is not None)

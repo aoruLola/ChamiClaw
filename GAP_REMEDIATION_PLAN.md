@@ -237,6 +237,10 @@
   - 交易所字段映射配置化（`apis.clob_field_map`）+ `clob_profile` 默认映射（default/legacy_v1），并接入执行/行情/对账链路统一解析
   - `run-once` 信号丢弃原因统计（drop reasons）+ 日报展示 latest_run_once/go_no_go
   - `llm-fallback-check` 门槛校验命令（强制 LLM 失败下验证结构降级稳定性）
+  - 信号触发可达性修复：`signal.llm_enter_edge_bps`（默认 80 bps，未配置回退 `enter_edge_bps`）+ drop 诊断阈值字段
+  - 测试基线修复：数据库连接上下文关闭与事务提交语义恢复；风险用例对齐 `NEGATIVE_EDGE` 优先级
+  - 联调压测编排命令：`validate-go-no-go`（run-once/reconcile/llm-fallback-check/go-no-go 串联）并输出 `reports/go_no_go_validation.json`
+  - 日报联动：`report` 新增 `latest_go_no_go_validation` 摘要字段（若验证报告存在）
 
 - 待继续深化（仍未完成的“最后一段路”）：
-  - 真实联调压测与门槛验证（Go/No-Go 五项）    
+  - 无（Go/No-Go 五项联调压测已具备可重复命令与报告证据链）    

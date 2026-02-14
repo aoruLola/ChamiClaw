@@ -32,6 +32,7 @@ scan:
 
 signal:
   enter_edge_bps: 250
+  llm_enter_edge_bps: 80
   exit_edge_bps: 80
   no_trade_zone_bps: 120
   min_confidence: 0.62

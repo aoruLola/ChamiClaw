@@ -49,6 +49,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - `doctor`
 - `llm-fallback-check`
 - `go-no-go`
+- `validate-go-no-go`
 - `alert-test`
 - `drill` (failure drill: `api-failure|reconcile-mismatch|drawdown-limit`, default dry-run)
 
@@ -63,6 +64,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
     - LLM2 expected response fields: `validated_fair_prob` or `fair_prob`, optional `confidence`, `rationale`, `risk_tags`.
 - On LLM failure, strategy degrades to structural signals only (if available).
 - Cost model uses `fee + depth-adjusted slippage + chain_cost_bps` and enforces edge-after-cost checks before model-only entries.
+- LLM-only entries use `signal.llm_enter_edge_bps` (default `80`) as the model-entry threshold; if unset, it falls back to `signal.enter_edge_bps`.
 - Structural signal set now includes:
   - `pair_cost_arb`
   - `cross_market_divergence` (same event peer markets)
@@ -78,6 +80,9 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - Drill command supports batch mode: `drill --scenario all` and writes records to `reports/drills.jsonl`.
 - Go/No-Go gate command: `chamiclaw go-no-go --config config/config.yaml`
   - checks reconcile stability, duplicate orders, risk-trace completeness, edge gate coverage, and llm degrade rate.
+- Integrated Go/No-Go validation command:
+  - `chamiclaw validate-go-no-go --config config/config.yaml --cycles 20 --reconcile-every 5 --fallback-iterations 50 --require-go-streak 3`
+  - writes `reports/go_no_go_validation.json` with per-cycle run/reconcile/go-no-go evidence and final blockers.
 - LLM fallback pressure check command:
   - `chamiclaw llm-fallback-check --config config/config.yaml --iterations 50`
   - verifies structural fallback keeps producing signals when LLM is forced to fail.

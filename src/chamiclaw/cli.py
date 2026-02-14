@@ -15,10 +15,15 @@ from chamiclaw.ops.alerting import post_discord_alert
 from chamiclaw.ops.secrets import get_secret_access_snapshot
 from chamiclaw.ops.state_machine import SystemStateMachine
 from chamiclaw.ops.drill import run_all_drills, run_failure_drill
+from chamiclaw.ops.go_no_go_validation import (
+    build_go_no_go_payload,
+    load_go_no_go_validation_summary,
+    run_go_no_go_validation,
+    run_llm_fallback_probe,
+)
 from chamiclaw.reconcile.engine import ReconcileEngine
 from chamiclaw.settings import load_settings
 from chamiclaw.utils.json_logger import JsonLogger
-from chamiclaw.signal.engine import SignalEngine
 
 
 def _build_app(config_path: str) -> tuple[dict, Database, ChamiClawApp]:
@@ -181,80 +186,45 @@ def cmd_state() -> None:
 
 def cmd_llm_fallback_check(config: str, iterations: int) -> None:
     cfg, _, _ = _build_app(config)
-    engine = SignalEngine(cfg)
-
-    class _FailingLlm:
-        def infer(self, market_prob, features):
-            raise RuntimeError("forced_llm_failure")
-
-    engine.llm1 = _FailingLlm()  # type: ignore[assignment]
-    ok = 0
-    dropped = 0
-    for i in range(max(1, int(iterations))):
-        debug = {}
-        signal = engine.generate(
-            market={"market_id": f"fallback-{i}", "event_id": "evt", "end_time_utc": "2099-01-01T00:00:00Z"},
-            quote={
-                "yes_mid": 0.45,
-                "no_mid": 0.45,
-                "spread_bps": 80,
-                "depth_imbalance": 0.1,
-                "sigma_5m": 0.02,
-                "depth_usd": 1000,
-            },
-            strategy_version="fallback-check",
-            peer_markets=[],
-            debug=debug,
-        )
-        if signal:
-            ok += 1
-        else:
-            dropped += 1
-    print(
-        json.dumps(
-            {
-                "iterations": int(iterations),
-                "signals_generated_under_forced_llm_failure": ok,
-                "dropped": dropped,
-                "pass": ok == int(iterations),
-            },
-            ensure_ascii=True,
-        )
-    )
+    result = run_llm_fallback_probe(cfg, iterations)
+    print(json.dumps(result, ensure_ascii=True))
 
 
 def cmd_go_no_go(config: str) -> None:
     _, db, _ = _build_app(config)
     snap = db.get_go_no_go_snapshot()
-    payload = _build_go_no_go_payload(snap)
+    payload = build_go_no_go_payload(snap)
     print(json.dumps(payload, ensure_ascii=True))
 
 
-def _build_go_no_go_payload(snap: dict) -> dict:
-    risk_complete_rate = 1.0
-    if snap["total_risk_rejects"] > 0:
-        risk_complete_rate = snap["risk_reject_complete"] / snap["total_risk_rejects"]
-    llm_degrade_rate = 0.0
-    if snap["llm_total_preds"] > 0:
-        llm_degrade_rate = snap["llm_error_preds"] / snap["llm_total_preds"]
-    checks = {
-        "reconcile_stable_recent": snap["reconcile_recent_bad"] == 0 and snap["reconcile_recent_total"] > 0,
-        "duplicate_orders_zero": snap["duplicate_order_signals"] == 0,
-        "risk_reject_trace_complete": risk_complete_rate >= 1.0,
-        "edge_check_coverage_ok": snap["edge_violation_orders"] == 0,
-        "llm_degrade_controlled": llm_degrade_rate <= 0.2,
-    }
-    blockers = [k for k, v in checks.items() if not v]
-    return {
-        "verdict": "GO" if not blockers else "NO_GO",
-        "checks": checks,
-        "blockers": blockers,
-        "metrics": {
-            **snap,
-            "risk_reject_trace_complete_rate": risk_complete_rate,
-            "llm_degrade_rate": llm_degrade_rate,
-        },
-    }
+def cmd_validate_go_no_go(
+    config: str,
+    cycles: int,
+    reconcile_every: int,
+    fallback_iterations: int,
+    require_go_streak: int,
+    output: str,
+) -> None:
+    report = run_go_no_go_validation(
+        config_path=config,
+        cycles=cycles,
+        reconcile_every=reconcile_every,
+        fallback_iterations=fallback_iterations,
+        require_go_streak=require_go_streak,
+        output_path=output,
+    )
+    print(
+        json.dumps(
+            {
+                "output_path": output,
+                "final_verdict": report["final"]["verdict"],
+                "blockers": report["final"]["blockers"],
+                "best_go_streak": report["final"]["best_go_streak"],
+                "required_go_streak": report["final"]["required_go_streak"],
+            },
+            ensure_ascii=True,
+        )
+    )
 
 
 def cmd_backtest(config: str) -> None:
@@ -340,7 +310,8 @@ def cmd_report(config: str) -> None:
                 drill_summary["latest"] = json.loads(lines[-1])
             except json.JSONDecodeError:
                 drill_summary["latest"] = {"raw": lines[-1]}
-    go_no_go = _build_go_no_go_payload(db.get_go_no_go_snapshot())
+    go_no_go = build_go_no_go_payload(db.get_go_no_go_snapshot())
+    latest_go_no_go_validation = load_go_no_go_validation_summary()
     latest_run_once = None
     with db.connect() as conn:
         row = conn.execute(
@@ -367,6 +338,7 @@ def cmd_report(config: str) -> None:
             "calibration_recommendation": calibration_obj.get("recommendation", {}),
             "drill_summary": drill_summary,
             "go_no_go": go_no_go,
+            "latest_go_no_go_validation": latest_go_no_go_validation,
             "latest_run_once": latest_run_once,
         },
     )
@@ -431,6 +403,7 @@ def build_parser() -> argparse.ArgumentParser:
             "state",
             "llm-fallback-check",
             "go-no-go",
+            "validate-go-no-go",
             "backtest",
             "report",
             "alert-test",
@@ -452,6 +425,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apply state transition during drill (default: dry-run)",
     )
     p.add_argument("--iterations", default=20, type=int, help="Iterations for llm-fallback-check")
+    p.add_argument("--cycles", default=20, type=int, help="Cycles for validate-go-no-go")
+    p.add_argument("--reconcile-every", default=5, type=int, help="Reconcile interval for validate-go-no-go")
+    p.add_argument("--fallback-iterations", default=50, type=int, help="Fallback probe iterations for validate-go-no-go")
+    p.add_argument("--require-go-streak", default=3, type=int, help="Required GO streak for validate-go-no-go")
+    p.add_argument("--output", default="reports/go_no_go_validation.json", help="Output path for validate-go-no-go report")
     return p
 
 
@@ -479,6 +457,15 @@ def main() -> None:
         cmd_llm_fallback_check(args.config, args.iterations)
     elif cmd == "go-no-go":
         cmd_go_no_go(args.config)
+    elif cmd == "validate-go-no-go":
+        cmd_validate_go_no_go(
+            args.config,
+            args.cycles,
+            args.reconcile_every,
+            args.fallback_iterations,
+            args.require_go_streak,
+            args.output,
+        )
     elif cmd == "backtest":
         cmd_backtest(args.config)
     elif cmd == "report":

@@ -20,6 +20,7 @@ class RiskEngineTest(unittest.TestCase):
     def test_reject_spread(self):
         d = self.engine.check(
             {
+                "expected_edge_after_costs_bps": 10,
                 "spread_bps": 200,
                 "position_pct": 0.01,
                 "cluster_exposure_pct": 0.01,
@@ -33,6 +34,7 @@ class RiskEngineTest(unittest.TestCase):
     def test_approve_nominal(self):
         d = self.engine.check(
             {
+                "expected_edge_after_costs_bps": 20,
                 "spread_bps": 50,
                 "position_pct": 0.01,
                 "cluster_exposure_pct": 0.01,
@@ -41,6 +43,20 @@ class RiskEngineTest(unittest.TestCase):
             }
         )
         self.assertTrue(d.approved)
+
+    def test_negative_edge_has_higher_priority_than_spread(self):
+        d = self.engine.check(
+            {
+                "expected_edge_after_costs_bps": -1,
+                "spread_bps": 999,
+                "position_pct": 0.01,
+                "cluster_exposure_pct": 0.01,
+                "daily_drawdown_pct": 0.0,
+                "open_orders_same_market": 0,
+            }
+        )
+        self.assertFalse(d.approved)
+        self.assertEqual(d.reject_code, "NEGATIVE_EDGE")
 
 
 if __name__ == "__main__":
