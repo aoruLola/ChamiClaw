@@ -134,9 +134,17 @@ class SignalEngine:
         costs = estimate_cost_bps(self.config, quote)
         expected_edge_after_costs_bps = edge_bps_raw - costs.total_bps
 
-        llm_enter_threshold_bps = float(
-            self.config["signal"].get("llm_enter_edge_bps", self.config["signal"]["enter_edge_bps"])
-        )
+        signal_cfg = self.config.get("signal", {})
+        llm_enter_threshold_bps = float(signal_cfg.get("llm_enter_edge_bps", signal_cfg.get("enter_edge_bps", 80)))
+
+        # Research-mode relaxation: improve reachability while keeping a floor.
+        # Applies only in dry-run mode.
+        if bool(self.config.get("execution", {}).get("dry_run", True)):
+            relax_bps = float(signal_cfg.get("research_relaxation_bps", 0))
+            min_floor_bps = float(signal_cfg.get("min_llm_enter_edge_bps", 20))
+            if relax_bps > 0:
+                llm_enter_threshold_bps = max(min_floor_bps, llm_enter_threshold_bps - relax_bps)
+
         if structural is None and llm2 is not None and expected_edge_after_costs_bps < llm_enter_threshold_bps:
             drop_reason = "EDGE_BELOW_ENTER_THRESHOLD"
             drop_category = "edge"
@@ -160,11 +168,19 @@ class SignalEngine:
             return None
 
         confidence = min(p["confidence"] for p in predictions if p["confidence"] is not None)
-        if structural is None and confidence < self.config["signal"]["min_confidence"]:
+        min_confidence = float(signal_cfg.get("min_confidence", 0.62))
+        if bool(self.config.get("execution", {}).get("dry_run", True)):
+            conf_relax = float(signal_cfg.get("research_confidence_relax", 0.0))
+            conf_floor = float(signal_cfg.get("min_confidence_floor", 0.50))
+            if conf_relax > 0:
+                min_confidence = max(conf_floor, min_confidence - conf_relax)
+
+        if structural is None and confidence < min_confidence:
             if debug is not None:
                 debug["drop_reason"] = "LOW_CONFIDENCE"
                 debug["drop_category"] = "confidence"
                 debug["confidence"] = confidence
+                debug["min_confidence"] = min_confidence
             return None
 
         signal_type = structural.signal_type if structural else "llm_edge"

@@ -25,21 +25,22 @@
 
 ### 3) 关键现状问题（2026-02-14 最新实测）
 - `run-once` 当前可运行（近期未复现卡死），但仍需继续观察长跑稳定性。
-- 当前统计：`markets=219`、`quotes=2578`、`signals=0`、`orders=0`、`audit_events=27`。
-- 最新 `run-once` 返回：`scanned_markets=129`、`quotes_written=129`、`signals_generated=0`、`orders_submitted=0`。
-- 信号掉落已细分为：
-  - `RAW_EDGE_BELOW_THRESHOLD=11`
-  - `EDGE_AFTER_COST_BELOW_THRESHOLD=8`
-  - `LOW_CONFIDENCE=1`
+- 当前统计：`markets=220`、`quotes=3487`、`signals=2`、`orders=0`、`audit_events=180`。
+- 最新 `run-once` 返回：`scanned_markets=132`、`quotes_written=132`、`signals_generated=2`、`orders_submitted=0`。
+- 信号掉落已细分为（最新）：
+  - `EDGE_AFTER_COST_BELOW_THRESHOLD=12`
+  - `RAW_EDGE_BELOW_THRESHOLD=7`
+- 已完成一版 reachability 修复：research 模式阈值放松（仅 dry-run 生效），信号由 0 提升到可产出。
 - 结论：当前主要阻塞在 **edge 与阈值/成本口径**，并非单纯风控或执行失败。
 - 结论：目前仍适合“数据与研究验证”，不适合直接实盘。
 
 ### 4) 最新优先级（按阻塞程度）
-1. **信号触发可达性修复（最高优先）**
-   - 主流程接入 `peer_markets`，让 `cross_market` / `term_structure` 真正生效
-   - 拆分并记录 drop reason 指标（edge/cost/confidence/conflict）
-   - 校准阈值：`llm_enter_edge_bps`、`min_confidence`、结构信号阈值
-2. **成本模型与阈值一致性修复**
+1. **信号触发可达性修复（进行中）**
+   - [x] 主流程接入 `peer_markets`，`cross_market` / `term_structure` 已可参与
+   - [x] 拆分并记录 drop reason 指标（edge/cost/confidence/conflict）
+   - [x] research 模式阈值放松（仅 dry-run）
+   - [ ] 进一步提升有效样本（当前 go/no-go 仍因 `min_effective_edge_sample` 阻塞）
+2. **成本模型与阈值一致性修复（仍高优先）**
    - 明确 fee/slippage/chain 的口径与单位（bps）
    - 对 `expected_edge_after_costs_bps` 增加审计日志，避免“过度扣减”误伤
    - 给 research 模式提供可回放的参数扫描（阈值网格）
