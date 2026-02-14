@@ -59,6 +59,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 ## Notes
 
 - `execution.dry_run=true` by default.
+- `execution.backend` supports `py-clob-client` (recommended) or `rest`.
 - Config load order: `.env -> config YAML/JSON -> CHAMICLAW_* env overrides`.
 - LLM modes:
   - `llm.mode=mock` (default): deterministic local mock inference.

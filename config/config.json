@@ -61,6 +61,8 @@
     "max_open_orders_per_market": 1
   },
   "execution": {
+    "backend": "py-clob-client",
+    "signature_type": 0,
     "limit_order_only": true,
     "order_timeout_sec": 45,
     "poll_interval_sec": 3,

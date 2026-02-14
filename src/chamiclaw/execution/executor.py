@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 
 from chamiclaw.exchange.endpoints import load_clob_endpoints, load_clob_field_map
 from chamiclaw.exchange.normalize import normalize_order_status, parse_order_response
+from chamiclaw.exchange.pyclob_adapter import PyClobAdapter, PyClobAdapterError
 from chamiclaw.ops.secrets import get_runtime_role
 from chamiclaw.utils.time import utc_now_iso
 
@@ -26,6 +27,7 @@ class ExecutionEngine:
     def __init__(self, config: dict) -> None:
         self.config = config
         self.execution_cfg = config.get("execution", {})
+        self.backend = str(self.execution_cfg.get("backend", "rest")).strip().lower()
         self.base_url = str(config.get("apis", {}).get("clob_base", "")).rstrip("/")
         self.endpoints = load_clob_endpoints(config)
         self.order_field_map = dict(load_clob_field_map(config).get("order", {}) or {})
@@ -134,12 +136,26 @@ class ExecutionEngine:
 
     def _live_precheck_failures(self) -> list[str]:
         failures: list[str] = []
+        if get_runtime_role() != "execution":
+            failures.append("runtime_role_not_execution")
+
+        if self.backend == "py-clob-client":
+            if not os.getenv("POLYMARKET_PRIVATE_KEY", "").strip():
+                failures.append("POLYMARKET_PRIVATE_KEY_missing")
+            if not os.getenv("POLYMARKET_API_KEY", "").strip():
+                failures.append("POLYMARKET_API_KEY_missing")
+            if not os.getenv("POLYMARKET_API_SECRET", "").strip():
+                failures.append("POLYMARKET_API_SECRET_missing")
+            if not os.getenv("POLYMARKET_API_PASSPHRASE", "").strip():
+                failures.append("POLYMARKET_API_PASSPHRASE_missing")
+            if not self.base_url:
+                failures.append("clob_base_missing")
+            return failures
+
         if not self.base_url:
             failures.append("clob_base_missing")
         if not os.getenv("CLOB_API_KEY", "").strip():
             failures.append("CLOB_API_KEY_missing")
-        if get_runtime_role() != "execution":
-            failures.append("runtime_role_not_execution")
         if not self.endpoints.submit_order or not self.endpoints.order_status or not self.endpoints.cancel_order:
             failures.append("clob_endpoints_incomplete")
         return failures
@@ -156,6 +172,19 @@ class ExecutionEngine:
                 reason="live_precheck_failed:" + ",".join(failures),
                 retries=0,
             )
+
+        if self.backend == "py-clob-client":
+            token_id = str(signal.get("token_id") or "").strip()
+            if not token_id:
+                return OrderResult(order_id=str(uuid.uuid4()), status="rejected", reason="token_id_missing_for_pyclob", retries=0)
+            try:
+                adapter = PyClobAdapter(self.config)
+                r = adapter.place_limit_order(token_id=token_id, side=str(signal.get("side", "buy_yes")), price=limit_price, size=quantity)
+                return OrderResult(order_id=r.order_id, status=r.status, reason="pyclob", retries=0)
+            except PyClobAdapterError as exc:
+                return OrderResult(order_id=str(uuid.uuid4()), status="rejected", reason=f"pyclob_error:{exc}", retries=0)
+            except Exception as exc:  # pragma: no cover
+                return OrderResult(order_id=str(uuid.uuid4()), status="rejected", reason=f"pyclob_unexpected:{exc}", retries=0)
 
         return self._place_live_order(signal=signal, limit_price=limit_price, quantity=quantity)
 

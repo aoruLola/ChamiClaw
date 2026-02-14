@@ -36,6 +36,21 @@ class GammaClient:
         return []
 
     @staticmethod
+    def parse_token_ids(raw_market: dict[str, Any]) -> list[str]:
+        ids_raw = raw_market.get("clobTokenIds", [])
+        if isinstance(ids_raw, str):
+            if ids_raw.startswith("["):
+                try:
+                    ids_raw = json.loads(ids_raw)
+                except json.JSONDecodeError:
+                    ids_raw = []
+            else:
+                ids_raw = []
+        if not isinstance(ids_raw, list):
+            return []
+        return [str(x) for x in ids_raw if str(x).strip()]
+
+    @staticmethod
     def parse_outcomes(raw_market: dict[str, Any]) -> tuple[list[str], list[float]]:
         outcomes_raw = raw_market.get("outcomes", [])
         prices_raw = raw_market.get("outcomePrices", [])

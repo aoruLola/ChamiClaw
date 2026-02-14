@@ -92,8 +92,20 @@ def build_deploy_readiness_report(config: dict[str, Any], go_no_go_snapshot: dic
         failures.append("execution.dry_run=true")
     if sec.role != "execution":
         failures.append("runtime_role_not_execution")
-    if not os.getenv("CLOB_API_KEY", "").strip():
-        failures.append("env.CLOB_API_KEY_missing")
+
+    backend = str(execution.get("backend", "rest")).strip().lower()
+    if backend == "py-clob-client":
+        if not os.getenv("POLYMARKET_PRIVATE_KEY", "").strip():
+            failures.append("env.POLYMARKET_PRIVATE_KEY_missing")
+        if not os.getenv("POLYMARKET_API_KEY", "").strip():
+            failures.append("env.POLYMARKET_API_KEY_missing")
+        if not os.getenv("POLYMARKET_API_SECRET", "").strip():
+            failures.append("env.POLYMARKET_API_SECRET_missing")
+        if not os.getenv("POLYMARKET_API_PASSPHRASE", "").strip():
+            failures.append("env.POLYMARKET_API_PASSPHRASE_missing")
+    else:
+        if not os.getenv("CLOB_API_KEY", "").strip():
+            failures.append("env.CLOB_API_KEY_missing")
 
     if str(llm.get("mode", "mock")).strip().lower() != "http":
         failures.append("llm.mode!=http")

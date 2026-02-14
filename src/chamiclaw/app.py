@@ -209,6 +209,13 @@ class ChamiClawApp:
             if bool(signal.get("model_degraded", False)):
                 llm_degraded_signals += 1
 
+            token_ids = market.get("clob_token_ids") or []
+            if isinstance(token_ids, list) and token_ids:
+                if signal.get("side") == "buy_no" and len(token_ids) >= 2:
+                    signal["token_id"] = str(token_ids[1])
+                else:
+                    signal["token_id"] = str(token_ids[0])
+
             self.db.insert_signal(signal)
             for pred in signal.get("predictions", []):
                 self.db.insert_prediction(signal["signal_id"], pred)

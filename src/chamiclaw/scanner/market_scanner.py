@@ -37,6 +37,7 @@ def scan_markets(config: dict[str, Any], client: GammaClient) -> list[dict[str, 
             continue
 
         outcomes, prices = client.parse_outcomes(raw)
+        token_ids = client.parse_token_ids(raw)
         if len(prices) < 2:
             continue
 
@@ -65,6 +66,7 @@ def scan_markets(config: dict[str, Any], client: GammaClient) -> list[dict[str, 
                 "tradable_reason": rule["reason"],
                 "outcomes": outcomes,
                 "outcome_prices": prices,
+                "clob_token_ids": token_ids,
                 "updated_at_utc": utc_now_iso(),
             }
         )

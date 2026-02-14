@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Automated Polymarket trading system"
 readme = "SYSTEM_DESIGN.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+  "py-clob-client",
+]
 
 [project.scripts]
 chamiclaw = "chamiclaw.cli:main"
