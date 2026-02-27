@@ -1,8 +1,0 @@
-__pycache__/
-*.pyc
-.venv/
-.env
-logs/*.jsonl
-data/*.db
-reports/*.json
-data/polymarket_api_creds.json

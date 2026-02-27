@@ -1,149 +1,106 @@
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE IF NOT EXISTS markets (
   market_id TEXT PRIMARY KEY,
-  event_id TEXT,
-  slug TEXT,
   question TEXT NOT NULL,
-  description TEXT,
-  end_time_utc TEXT,
-  liquidity_usd REAL DEFAULT 0,
-  volume_usd REAL DEFAULT 0,
-  rule_summary_json TEXT,
-  tradable INTEGER DEFAULT 0,
-  tradable_reason TEXT,
-  updated_at_utc TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS quotes (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  market_id TEXT NOT NULL,
-  ts_utc TEXT NOT NULL,
-  yes_bid REAL,
-  yes_ask REAL,
-  no_bid REAL,
-  no_ask REAL,
-  yes_mid REAL,
-  no_mid REAL,
-  spread_bps REAL,
-  depth_usd REAL,
-  depth_imbalance REAL,
-  sigma_5m REAL,
-  raw_json TEXT,
-  FOREIGN KEY (market_id) REFERENCES markets(market_id)
-);
-CREATE INDEX IF NOT EXISTS idx_quotes_market_ts ON quotes (market_id, ts_utc);
-
-CREATE TABLE IF NOT EXISTS signals (
-  signal_id TEXT PRIMARY KEY,
-  market_id TEXT NOT NULL,
-  strategy_version TEXT NOT NULL,
-  signal_type TEXT NOT NULL,
-  side TEXT NOT NULL,
-  market_prob REAL NOT NULL,
-  fair_prob REAL,
-  edge_bps REAL,
-  expected_edge_after_costs_bps REAL,
-  confidence REAL,
-  reason TEXT,
+  end_time TIMESTAMPTZ NOT NULL,
   status TEXT NOT NULL,
-  created_at_utc TEXT NOT NULL,
-  FOREIGN KEY (market_id) REFERENCES markets(market_id)
+  tags JSONB NOT NULL,
+  rule_text TEXT NOT NULL,
+  rule_summary TEXT NOT NULL,
+  resolution_sources JSONB NOT NULL,
+  rule_clarity_score DOUBLE PRECISION NOT NULL,
+  liquidity_score DOUBLE PRECISION NOT NULL,
+  market_score DOUBLE PRECISION NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_signals_market_time ON signals (market_id, created_at_utc);
 
-CREATE TABLE IF NOT EXISTS predictions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  signal_id TEXT,
-  model_name TEXT NOT NULL,
-  fair_prob REAL,
-  confidence REAL,
-  rationale TEXT,
-  risk_tags_json TEXT,
-  created_at_utc TEXT NOT NULL,
-  FOREIGN KEY (signal_id) REFERENCES signals(signal_id)
+CREATE TABLE IF NOT EXISTS price_snapshots (
+  ts TIMESTAMPTZ NOT NULL,
+  market_id TEXT NOT NULL,
+  best_bid DOUBLE PRECISION NOT NULL,
+  best_ask DOUBLE PRECISION NOT NULL,
+  mid DOUBLE PRECISION NOT NULL,
+  spread DOUBLE PRECISION NOT NULL,
+  last DOUBLE PRECISION NOT NULL,
+  depth_topk_json JSONB NOT NULL,
+  volume_1m DOUBLE PRECISION NOT NULL,
+  trades_1m INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS price_signals (
+  ts TIMESTAMPTZ NOT NULL,
+  market_id TEXT NOT NULL,
+  change_1m DOUBLE PRECISION NOT NULL,
+  change_5m DOUBLE PRECISION NOT NULL,
+  change_15m DOUBLE PRECISION NOT NULL,
+  vol_ratio_15m DOUBLE PRECISION NOT NULL,
+  spread_status TEXT NOT NULL,
+  breakout_15m BOOLEAN NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS info_signals (
+  ts TIMESTAMPTZ NOT NULL,
+  market_id TEXT NOT NULL,
+  event_detected BOOLEAN NOT NULL,
+  risk_score DOUBLE PRECISION NOT NULL,
+  confirmation_level INTEGER NOT NULL,
+  clarification_flag BOOLEAN NOT NULL,
+  top_sources_json JSONB,
+  extracted_claims_json JSONB
+);
+
+CREATE TABLE IF NOT EXISTS mode_states (
+  ts TIMESTAMPTZ NOT NULL,
+  market_id TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  reason_codes_json JSONB NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS orders (
+  ts TIMESTAMPTZ NOT NULL,
   order_id TEXT PRIMARY KEY,
-  signal_id TEXT,
   market_id TEXT NOT NULL,
   side TEXT NOT NULL,
-  limit_price REAL NOT NULL,
-  quantity REAL NOT NULL,
+  action TEXT NOT NULL,
+  order_type TEXT NOT NULL,
+  limit_price DOUBLE PRECISION,
+  size_usd DOUBLE PRECISION NOT NULL,
   status TEXT NOT NULL,
-  retries INTEGER DEFAULT 0,
-  created_at_utc TEXT NOT NULL,
-  updated_at_utc TEXT NOT NULL,
-  FOREIGN KEY (signal_id) REFERENCES signals(signal_id),
-  FOREIGN KEY (market_id) REFERENCES markets(market_id)
+  adapter TEXT NOT NULL,
+  raw_json JSONB
 );
-CREATE INDEX IF NOT EXISTS idx_orders_market_status ON orders (market_id, status);
 
-CREATE TABLE IF NOT EXISTS trades (
-  trade_id TEXT PRIMARY KEY,
-  order_id TEXT,
+CREATE TABLE IF NOT EXISTS fills (
+  ts TIMESTAMPTZ NOT NULL,
+  order_id TEXT NOT NULL,
   market_id TEXT NOT NULL,
-  side TEXT NOT NULL,
-  fill_price REAL NOT NULL,
-  fill_qty REAL NOT NULL,
-  fee_usd REAL DEFAULT 0,
-  slippage_bps REAL DEFAULT 0,
-  pnl_usd REAL,
-  ts_utc TEXT NOT NULL,
-  FOREIGN KEY (order_id) REFERENCES orders(order_id),
-  FOREIGN KEY (market_id) REFERENCES markets(market_id)
+  fill_price DOUBLE PRECISION NOT NULL,
+  fill_size DOUBLE PRECISION NOT NULL,
+  fee DOUBLE PRECISION NOT NULL,
+  raw_json JSONB
 );
 
-CREATE TABLE IF NOT EXISTS positions (
-  market_id TEXT PRIMARY KEY,
-  yes_qty REAL DEFAULT 0,
-  no_qty REAL DEFAULT 0,
-  avg_cost_yes REAL,
-  avg_cost_no REAL,
-  unrealized_pnl_usd REAL DEFAULT 0,
-  updated_at_utc TEXT NOT NULL,
-  FOREIGN KEY (market_id) REFERENCES markets(market_id)
+CREATE TABLE IF NOT EXISTS positions_snapshots (
+  ts TIMESTAMPTZ NOT NULL,
+  equity DOUBLE PRECISION NOT NULL,
+  cash DOUBLE PRECISION NOT NULL,
+  positions_json JSONB NOT NULL,
+  daily_pnl DOUBLE PRECISION NOT NULL,
+  consecutive_losses INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS audit_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts_utc TEXT NOT NULL,
-  level TEXT NOT NULL,
-  category TEXT NOT NULL,
-  code TEXT NOT NULL,
-  message TEXT NOT NULL,
-  context_json TEXT
-);
-
-CREATE TABLE IF NOT EXISTS strategy_versions (
-  strategy_version TEXT PRIMARY KEY,
-  created_at_utc TEXT NOT NULL,
-  config_snapshot_json TEXT NOT NULL,
-  notes TEXT
-);
-
-CREATE TABLE IF NOT EXISTS paper_results (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  signal_id TEXT,
+CREATE TABLE IF NOT EXISTS trade_logs (
+  ts TIMESTAMPTZ NOT NULL,
   market_id TEXT NOT NULL,
-  horizon_min INTEGER NOT NULL,
-  entry_prob REAL NOT NULL,
-  exit_prob REAL,
-  realized_edge_bps REAL,
-  created_at_utc TEXT NOT NULL,
-  FOREIGN KEY (signal_id) REFERENCES signals(signal_id),
-  FOREIGN KEY (market_id) REFERENCES markets(market_id)
+  mode TEXT NOT NULL,
+  entry_ts TIMESTAMPTZ,
+  exit_ts TIMESTAMPTZ,
+  entry_price DOUBLE PRECISION,
+  exit_price DOUBLE PRECISION,
+  spread_entry DOUBLE PRECISION,
+  spread_exit DOUBLE PRECISION,
+  event_risk DOUBLE PRECISION,
+  confirmation_level INTEGER,
+  pnl DOUBLE PRECISION,
+  holding_time INTEGER,
+  reason_json JSONB
 );
-
-
-CREATE TABLE IF NOT EXISTS mm_pnl_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  idempotency_key TEXT NOT NULL UNIQUE,
-  market_id TEXT NOT NULL,
-  side TEXT NOT NULL,
-  final_state TEXT NOT NULL,
-  pnl_class TEXT NOT NULL,
-  created_at_utc TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_mm_pnl_market_time ON mm_pnl_events (market_id, created_at_utc);
