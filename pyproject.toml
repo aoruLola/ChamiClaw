@@ -1,22 +1,34 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
 [project]
 name = "chamiclaw"
 version = "0.1.0"
-description = "Automated Polymarket trading system"
-readme = "SYSTEM_DESIGN.md"
-requires-python = ">=3.10"
+description = "Minute-level Polymarket quant system (Gamma + self-built market data + Brave info + Simmer execution)"
+readme = "README.md"
+requires-python = ">=3.12"
 dependencies = [
-  "py-clob-client",
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "pydantic>=2.8",
+  "httpx>=0.27",
+  "websockets>=12.0",
+  "apscheduler>=3.10",
+  "structlog>=24.2",
 ]
 
-[project.scripts]
-chamiclaw = "chamiclaw.cli:main"
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.6",
+]
 
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
 
-[tool.setuptools]
-package-dir = {"" = "src"}
+[tool.ruff]
+line-length = 100
 
-[tool.setuptools.packages.find]
-where = ["src"]

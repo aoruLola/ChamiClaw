@@ -1,2 +1,0 @@
-[2m2026-02-13T23:51:27.818114Z[0m [31mERROR[0m [2mcodex_core::rollout::list[0m[2m:[0m state db missing rollout path for thread 019c5817-03af-7d42-81be-83072888822f
-[2m2026-02-13T23:51:27.835087Z[0m [31mERROR[0m [2mcodex_core::rollout::list[0m[2m:[0m state db missing rollout path for thread 019c5817-fffe-7b60-a3ca-9be8ab3a1d97
