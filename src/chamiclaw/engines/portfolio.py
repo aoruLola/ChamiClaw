@@ -4,14 +4,14 @@ from chamiclaw.core.models import PortfolioState
 
 
 class PortfolioEngine:
-    def __init__(self) -> None:
-        self.state = PortfolioState()
+    """Portfolio state transitions driven by realized PnL events."""
 
-    def on_fill(self, realized_pnl: float) -> PortfolioState:
-        self.state.daily_pnl += realized_pnl
-        self.state.equity += realized_pnl
+    def apply_realized_pnl(self, portfolio: PortfolioState, realized_pnl: float) -> PortfolioState:
+        portfolio.daily_pnl += realized_pnl
+        portfolio.equity += realized_pnl
+        portfolio.cash += realized_pnl
         if realized_pnl < 0:
-            self.state.consecutive_losses += 1
+            portfolio.consecutive_losses += 1
         else:
-            self.state.consecutive_losses = 0
-        return self.state
+            portfolio.consecutive_losses = 0
+        return portfolio

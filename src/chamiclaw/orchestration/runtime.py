@@ -7,7 +7,7 @@ from chamiclaw.engines.market import MarketService
 from chamiclaw.engines.mode import ModeEngine
 from chamiclaw.engines.risk import RiskEngine
 from chamiclaw.engines.strategy import StrategyEngine
-from chamiclaw.storage.repository import InMemoryRepository
+from chamiclaw.storage.repository import Repository
 
 
 class RuntimeOrchestrator:
@@ -15,7 +15,7 @@ class RuntimeOrchestrator:
 
     def __init__(
         self,
-        repo: InMemoryRepository,
+        repo: Repository,
         market_service: MarketService,
         info_engine: InfoEngine,
         mode_engine: ModeEngine,

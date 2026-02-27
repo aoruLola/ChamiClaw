@@ -138,6 +138,8 @@ class PortfolioState(BaseModel):
     consecutive_losses: int = 0
     max_drawdown_pct: float = 0.0
     per_market_drawdown_pct: dict[str, float] = Field(default_factory=dict)
+    pause_until: datetime | None = None
+    daily_halt: bool = False
 
 
 class ApprovedOrder(BaseModel):

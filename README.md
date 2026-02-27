@@ -21,10 +21,25 @@ pip install -e .[dev]
 uvicorn chamiclaw.api.app:app --reload
 ```
 
+## 配置（T1）
+
+可通过环境变量切换仓储后端：
+
+- `REPOSITORY_BACKEND=memory|sqlite`（默认 `memory`）
+- `SQLITE_PATH=data/chamiclaw_t1.db`
+- `SCHEDULER_ENABLED=true|false`（默认 `false`）
+- `LOG_LEVEL=INFO|DEBUG|...`（默认 `INFO`）
+
 ## API（当前最小实现）
 
 - `GET /health`
+- `GET /ops/state`（查看内存/仓储运行状态，含 risk_controls）
+- `GET /ops/config`（查看当前运行配置）
 - `POST /ops/tick`（执行一次完整编排周期）
+- `POST /ops/risk/reset`（重置风控冷却/日内停机状态）
+- `POST /ops/trade-stats/reset`（重置交易计数）
+- `POST /ops/portfolio/apply-pnl`（注入已实现PnL并更新组合状态）
+- `POST /ops/state/reset`（清空运行态缓存信号，可选清空市场池/交易统计/风控控制位）
 - `POST /markets/rank`
 - `POST /price/ingest`
 - `POST /info/analyze`
@@ -43,7 +58,6 @@ uvicorn chamiclaw.api.app:app --reload
 - `tests/`: 关键规则单测
 
 ## 运行节奏（默认）
-
 - Price Engine: 30 秒
 - Strategy Loop: 3 分钟
 - Market Service: 5 分钟
