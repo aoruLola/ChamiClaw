@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from chamiclaw.core.models import ApprovedOrder, OrderIntent, OrderMode, PortfolioState
+from chamiclaw.core.models import Action, ApprovedOrder, OrderIntent, OrderMode, PortfolioState
 
 
 def utc_now() -> datetime:
@@ -16,6 +16,9 @@ class RiskEngine:
 
     def validate(self, intent: OrderIntent, portfolio: PortfolioState, now: datetime | None = None) -> ApprovedOrder:
         ts = now or utc_now()
+
+        if intent.action == Action.CLOSE:
+            return ApprovedOrder(approved=True, reason="approved_close", intent=intent)
 
         if portfolio.daily_halt or portfolio.max_drawdown_pct >= 0.03:
             portfolio.daily_halt = True

@@ -40,6 +40,7 @@ class PriceEngine:
 
         spread_status = SpreadStatus.stable if spread <= 0.015 else SpreadStatus.wide
         breakout_15m = abs(change_15m) >= 0.03
+        anomaly_flag = abs(change_1m) >= 0.02 or spread_status == SpreadStatus.wide
 
         snapshot = PriceSnapshot(
             market_id=market_id,
@@ -60,6 +61,7 @@ class PriceEngine:
             vol_ratio_15m=vol_ratio,
             spread_status=spread_status,
             breakout_15m=breakout_15m,
+            anomaly_flag=anomaly_flag,
             spread=spread,
             mid=mid,
         )

@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException
 
 from chamiclaw.adapters.simmer import SimmerAdapter
-from chamiclaw.core.models import InfoSignal, MarketCard, PortfolioState, PriceSignal
+from chamiclaw.clients.brave import BraveClient
+from chamiclaw.clients.clob import CLOBClient
+from chamiclaw.clients.gamma import GammaClient
+from chamiclaw.core.models import InfoSignal, MarketCard, OrderRecord, PortfolioState, PriceSignal
 from chamiclaw.core.settings import AppSettings
 from chamiclaw.engines.execution import ExecutionEngine
 from chamiclaw.engines.info import InfoEngine
 from chamiclaw.engines.market import MarketService
 from chamiclaw.engines.mode import ModeEngine
+from chamiclaw.engines.phase_gate import PhaseGateService
 from chamiclaw.engines.portfolio import PortfolioEngine
 from chamiclaw.engines.price import PriceEngine
 from chamiclaw.engines.risk import RiskEngine
@@ -18,20 +25,35 @@ from chamiclaw.orchestration.runtime import RuntimeOrchestrator
 from chamiclaw.orchestration.scheduler import TaskScheduler
 from chamiclaw.storage.repository import build_repository
 
-app = FastAPI(title="ChamiClaw", version="0.4.0")
 settings = AppSettings.load()
 configure_logging(settings.log_level)
 logger = get_logger("chamiclaw.api")
 
 repo = build_repository(settings)
-market_service = MarketService()
+gamma_client = GammaClient(settings.gamma_base_url)
+clob_client = CLOBClient(settings.clob_rest_url, settings.clob_ws_url)
+brave_client = BraveClient(settings.brave_api_key)
+market_service = MarketService(gamma_client=gamma_client)
 price_engine = PriceEngine()
-info_engine = InfoEngine()
+info_engine = InfoEngine(brave_client=brave_client)
 mode_engine = ModeEngine()
 strategy_engine = StrategyEngine()
 risk_engine = RiskEngine()
 portfolio_engine = PortfolioEngine()
-execution_engine = ExecutionEngine(adapter=SimmerAdapter())
+execution_engine = ExecutionEngine(
+    adapter=SimmerAdapter(base_url=settings.simmer_base_url, api_key=settings.simmer_api_key),
+    dry_run=settings.execution_dry_run,
+    max_retries=settings.execution_max_retries,
+    retry_backoff_seconds=settings.execution_retry_backoff_seconds,
+    breaker_failures=settings.execution_breaker_failures,
+    breaker_cooldown_seconds=settings.execution_breaker_cooldown_seconds,
+)
+phase_gate_service = PhaseGateService(
+    min_trades=settings.phase1_min_trades,
+    min_win_rate=settings.phase1_min_win_rate,
+    min_rr=settings.phase1_min_rr,
+    max_drawdown=settings.phase1_max_drawdown,
+)
 orchestrator = RuntimeOrchestrator(
     repo=repo,
     market_service=market_service,
@@ -40,6 +62,18 @@ orchestrator = RuntimeOrchestrator(
     strategy_engine=strategy_engine,
     risk_engine=risk_engine,
     execution_engine=execution_engine,
+    portfolio_engine=portfolio_engine,
+    phase_gate_service=phase_gate_service,
+    price_engine=price_engine,
+    clob_client=clob_client,
+    ws_max_retries=settings.clob_ws_max_retries,
+    ws_backoff_base_seconds=settings.clob_ws_backoff_base_seconds,
+    ws_backoff_max_seconds=settings.clob_ws_backoff_max_seconds,
+    ws_stale_timeout_seconds=settings.ws_stale_timeout_seconds,
+    price_flush_seconds=settings.price_flush_seconds,
+    anomaly_debounce_seconds=settings.price_flush_seconds,
+    execution_rate_limit_per_market_per_minute=settings.execution_rate_limit_per_market_per_minute,
+    execution_rate_limit_global_per_minute=settings.execution_rate_limit_global_per_minute,
 )
 scheduler = TaskScheduler(settings)
 
@@ -60,19 +94,39 @@ scheduler.bootstrap_defaults(
 )
 
 
-@app.on_event("startup")
-async def startup() -> None:
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     scheduler_started = scheduler.start()
-    logger.info("startup", scheduler_started=scheduler_started, repository_backend=settings.repository_backend)
+    market_ids = await orchestrator.bootstrap_market_pool(top_n=10)
+    if not market_ids:
+        market_ids = orchestrator.refresh_market_subscriptions()
+    restored_compensations = orchestrator.restore_execution_compensations()
+    repo.update_price_stream_state(running=True, reconnects=clob_client.reconnect_count)
+    stream_task = asyncio.create_task(orchestrator.run_price_stream(market_ids), name="price-stream")
+    _app.state.price_stream_task = stream_task
+    logger.info(
+        "startup",
+        scheduler_started=scheduler_started,
+        repository_backend=settings.repository_backend,
+        execution_dry_run=execution_engine.dry_run,
+        subscribed_markets=len(market_ids),
+        restored_compensations=restored_compensations,
+    )
+    try:
+        yield
+    finally:
+        orchestrator.request_price_stream_stop()
+        if stream_task is not None:
+            stream_task.cancel()
+            await asyncio.gather(stream_task, return_exceptions=True)
+        scheduler.stop()
+        close_fn = getattr(repo, "close", None)
+        if callable(close_fn):
+            close_fn()
+        logger.info("shutdown")
 
 
-@app.on_event("shutdown")
-async def shutdown() -> None:
-    scheduler.stop()
-    close_fn = getattr(repo, "close", None)
-    if callable(close_fn):
-        close_fn()
-    logger.info("shutdown")
+app = FastAPI(title="ChamiClaw", version="0.4.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -82,6 +136,11 @@ async def health() -> dict:
         "version": "0.4.0",
         "jobs": list(scheduler.jobs.keys()),
         "repository_backend": settings.repository_backend,
+        "execution_dry_run": execution_engine.dry_run,
+        "phase": repo.phase_gate_state.phase.value,
+        "price_stream_running": repo.price_stream_running,
+        "price_stream_last_event_ts": repo.price_stream_last_event_ts.isoformat() if repo.price_stream_last_event_ts else None,
+        "price_stream_reconnects": repo.price_stream_reconnects,
     }
 
 
@@ -89,11 +148,17 @@ async def health() -> dict:
 async def ops_state() -> dict:
     return {
         "markets": len(repo.markets),
+        "price_snapshots": len(repo.price_snapshots),
         "price_signals": len(repo.price_signals),
         "info_signals": len(repo.info_signals),
         "mode_states": len(repo.mode_states),
         "trade_stats": repo.trade_stats.model_dump(),
         "scheduler_enabled": settings.scheduler_enabled,
+        "execution_dry_run": execution_engine.dry_run,
+        "phase_gate": repo.phase_gate_state.model_dump(mode="json"),
+        "price_stream_running": repo.price_stream_running,
+        "price_stream_last_event_ts": repo.price_stream_last_event_ts.isoformat() if repo.price_stream_last_event_ts else None,
+        "price_stream_reconnects": repo.price_stream_reconnects,
         "risk_controls": {
             "daily_halt": repo.portfolio.daily_halt,
             "pause_until": repo.portfolio.pause_until.isoformat() if repo.portfolio.pause_until else None,
@@ -177,9 +242,19 @@ async def reset_runtime_state(
 async def tick_once() -> dict:
     ranked = orchestrator.market_refresh()
     info = orchestrator.info_refresh()
+    info += orchestrator.info_refresh(anomaly_only=True)
     mode = orchestrator.mode_refresh()
+    orchestrator.evaluate_phase_gate(admin_override=False)
     executed = await orchestrator.strategy_loop()
-    payload = {"ranked": ranked, "info": info, "mode": mode, "executed": executed}
+    reconciled_orders = await orchestrator.reconcile_order_statuses(limit=100)
+    payload = {
+        "ranked": ranked,
+        "info": info,
+        "mode": mode,
+        "executed": executed,
+        "reconciled_orders": reconciled_orders,
+        "phase": repo.phase_gate_state.model_dump(mode="json"),
+    }
     logger.info("tick", **payload)
     return payload
 
@@ -237,12 +312,111 @@ async def run_strategy(mode_market_id: str, price_signal: PriceSignal, portfolio
         mode_state,
         price_signal,
         trade_stats=repo.trade_stats,
+        allow_mode_b=repo.phase_gate_state.allowed_mode_b,
     )
     if intent is None:
         return {"intent": None, "approved": False, "reason": "no_signal_or_mode_limit"}
 
     approved = risk_engine.validate(intent, portfolio)
-    order_id = await execution_engine.execute(approved)
-    if approved.approved and approved.intent is not None:
+    result = await execution_engine.execute(approved)
+    if approved.approved and approved.intent is not None and result and result.accepted:
         repo.register_trade(approved.intent.mode.value)
-    return {"intent": intent, "approved": approved.approved, "reason": approved.reason, "order_id": order_id}
+        repo.record_order(
+            OrderRecord(
+                order_id=result.order_id or "",
+                market_id=approved.intent.market_id,
+                side=approved.intent.side,
+                action=approved.intent.action,
+                order_type=approved.intent.order_type,
+                limit_price=approved.intent.limit_price,
+                size_usd=approved.intent.size_usd,
+                status=result.status,
+                adapter=execution_engine.adapter.__class__.__name__,
+                mode=approved.intent.mode,
+                dry_run=result.dry_run,
+                raw=result.raw,
+            )
+        )
+    return {
+        "intent": intent,
+        "approved": approved.approved,
+        "reason": approved.reason,
+        "execution": result.model_dump(mode="json") if result else None,
+    }
+
+
+@app.get("/ops/phase")
+async def ops_phase() -> dict:
+    return repo.phase_gate_state.model_dump(mode="json")
+
+
+@app.post("/ops/phase/evaluate")
+async def evaluate_phase(admin_override: bool = False) -> dict:
+    orchestrator.evaluate_phase_gate(admin_override=admin_override)
+    payload = repo.phase_gate_state.model_dump(mode="json")
+    logger.info("phase_evaluated", **payload)
+    return payload
+
+
+@app.post("/ops/dry-run/set")
+async def set_dry_run(enabled: bool = True) -> dict:
+    execution_engine.set_dry_run(enabled)
+    payload = {"execution_dry_run": execution_engine.dry_run}
+    logger.info("dry_run_set", **payload)
+    return payload
+
+
+@app.post("/ops/replay/run")
+async def replay_run(minutes: int = 60) -> dict:
+    payload = repo.replay_window(minutes)
+    logger.info("replay_run", **payload)
+    return payload
+
+
+@app.post("/ops/execution/reconcile")
+async def reconcile_execution() -> dict:
+    portfolio = await orchestrator.reconcile_execution_state()
+    payload = {
+        "equity": portfolio.equity,
+        "cash": portfolio.cash,
+        "positions": [p.model_dump(mode="json") for p in portfolio.positions],
+        "unrealized_pnl": portfolio.unrealized_pnl,
+    }
+    logger.info("execution_reconcile", equity=portfolio.equity, cash=portfolio.cash, positions=len(portfolio.positions))
+    return payload
+
+
+@app.post("/ops/execution/reconcile-orders")
+async def reconcile_orders(limit: int = 50) -> dict:
+    updated = await orchestrator.reconcile_order_statuses(limit=limit)
+    payload = {"updated_orders": updated}
+    logger.info("order_reconcile", **payload)
+    return payload
+
+
+@app.post("/ops/execution/compensations/drain")
+async def drain_compensations(max_items: int = 10) -> dict:
+    drained = await execution_engine.drain_compensations(max_items=max_items)
+    sync_payload = orchestrator.sync_execution_compensations()
+    health = execution_engine.health_snapshot()
+    payload = {
+        "drained": drained,
+        "pending_compensations": health["pending_compensations"],
+        "stored_compensations": sync_payload["stored"],
+    }
+    logger.info("execution_compensation_drain", **payload)
+    return payload
+
+
+@app.get("/ops/execution/health")
+async def execution_health() -> dict:
+    payload = execution_engine.health_snapshot()
+    logger.info("execution_health", **payload)
+    return payload
+
+
+@app.get("/ops/metrics/summary")
+async def metrics_summary() -> dict:
+    payload = repo.metrics_summary()
+    logger.info("metrics_summary", **payload)
+    return payload

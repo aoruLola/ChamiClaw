@@ -1,13 +1,35 @@
 from __future__ import annotations
 
-from chamiclaw.core.models import Mode, PortfolioState
+import asyncio
+from collections import defaultdict, deque
+from datetime import datetime, timedelta, timezone
+from typing import Callable
+
+from chamiclaw.clients.clob import CLOBClient
+from chamiclaw.core.models import (
+    Action,
+    FillRecord,
+    Mode,
+    NormalizedMarketTick,
+    OrderRecord,
+    OrderStatus,
+    PortfolioState,
+    Position,
+    PriceSignal,
+)
+from chamiclaw.engines.price import PriceEngine
 from chamiclaw.engines.execution import ExecutionEngine
+from chamiclaw.engines.phase_gate import PhaseGateService
 from chamiclaw.engines.info import InfoEngine
 from chamiclaw.engines.market import MarketService
 from chamiclaw.engines.mode import ModeEngine
+from chamiclaw.engines.portfolio import PortfolioEngine
 from chamiclaw.engines.risk import RiskEngine
 from chamiclaw.engines.strategy import StrategyEngine
+from chamiclaw.obs.logging import get_logger
 from chamiclaw.storage.repository import Repository
+
+logger = get_logger("chamiclaw.runtime")
 
 
 class RuntimeOrchestrator:
@@ -22,6 +44,19 @@ class RuntimeOrchestrator:
         strategy_engine: StrategyEngine,
         risk_engine: RiskEngine,
         execution_engine: ExecutionEngine,
+        portfolio_engine: PortfolioEngine | None = None,
+        phase_gate_service: PhaseGateService | None = None,
+        price_engine: PriceEngine | None = None,
+        clob_client: CLOBClient | None = None,
+        ws_max_retries: int = 10,
+        ws_backoff_base_seconds: float = 1.0,
+        ws_backoff_max_seconds: float = 30.0,
+        ws_stale_timeout_seconds: int = 90,
+        price_flush_seconds: int = 30,
+        anomaly_debounce_seconds: int = 30,
+        execution_rate_limit_per_market_per_minute: int = 3,
+        execution_rate_limit_global_per_minute: int = 20,
+        now_fn: Callable[[], datetime] | None = None,
     ):
         self.repo = repo
         self.market_service = market_service
@@ -30,6 +65,24 @@ class RuntimeOrchestrator:
         self.strategy_engine = strategy_engine
         self.risk_engine = risk_engine
         self.execution_engine = execution_engine
+        self.portfolio_engine = portfolio_engine or PortfolioEngine()
+        self.phase_gate_service = phase_gate_service
+        self.price_engine = price_engine or PriceEngine()
+        self.clob_client = clob_client
+        self.ws_max_retries = ws_max_retries
+        self.ws_backoff_base_seconds = ws_backoff_base_seconds
+        self.ws_backoff_max_seconds = ws_backoff_max_seconds
+        self.ws_stale_timeout_seconds = ws_stale_timeout_seconds
+        self.price_flush_seconds = max(price_flush_seconds, 0)
+        self.anomaly_debounce_seconds = max(anomaly_debounce_seconds, 1)
+        self.execution_rate_limit_per_market_per_minute = max(execution_rate_limit_per_market_per_minute, 1)
+        self.execution_rate_limit_global_per_minute = max(execution_rate_limit_global_per_minute, 1)
+        self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
+        self._price_stream_stop = asyncio.Event()
+        self._last_anomaly_refresh_ts: datetime | None = None
+        self._position_opened_at: dict[str, datetime] = {}
+        self._market_order_tape: dict[str, deque[datetime]] = defaultdict(deque)
+        self._global_order_tape: deque[datetime] = deque()
 
     def market_refresh(self) -> int:
         cards = list(self.repo.markets.values())
@@ -38,13 +91,34 @@ class RuntimeOrchestrator:
             self.repo.upsert_market(card)
         return len(ranked)
 
-    def info_refresh(self) -> int:
+    async def bootstrap_market_pool(self, top_n: int = 10) -> list[str]:
+        refreshed = await self.market_service.refresh_pool(top_n=top_n)
+        for card in refreshed:
+            self.repo.upsert_market(card)
+        return [card.market_id for card in refreshed]
+
+    def info_refresh(self, anomaly_only: bool = False) -> int:
         count = 0
-        for market_id in self.repo.markets:
+        market_ids = list(self.repo.markets.keys())
+        if anomaly_only:
+            market_ids = [m for m, s in self.repo.price_signals.items() if s.anomaly_flag]
+
+        for market_id in market_ids:
             signal = self.info_engine.analyze(market_id=market_id, source_tiers=[1], event_detected=False)
             self.repo.put_info_signal(signal)
             count += 1
         return count
+
+    def evaluate_phase_gate(self, admin_override: bool = False) -> None:
+        if self.phase_gate_service is None:
+            return
+        state = self.phase_gate_service.evaluate(
+            self.repo.trade_stats,
+            max_drawdown_pct=self.repo.portfolio.max_drawdown_pct,
+            current=self.repo.phase_gate_state,
+            admin_override=admin_override,
+        )
+        self.repo.save_phase_gate(state)
 
     def mode_refresh(self) -> int:
         count = 0
@@ -67,17 +141,447 @@ class RuntimeOrchestrator:
             price_signal = self.repo.price_signals.get(market_id)
             if price_signal is None:
                 continue
+            position_size, position_avg_price, held_minutes = self._position_context(pf, market_id)
             intent = self.strategy_engine.generate_intent(
                 pf.equity,
                 mode_state,
                 price_signal,
                 trade_stats=self.repo.trade_stats,
+                position_size=position_size,
+                position_avg_price=position_avg_price,
+                held_minutes=held_minutes,
+                allow_mode_b=self.repo.phase_gate_state.allowed_mode_b,
             )
             if intent is None:
                 continue
             approved = self.risk_engine.validate(intent, pf)
-            order_id = await self.execution_engine.execute(approved)
-            if approved.approved and order_id:
+            if approved.approved and approved.intent is not None:
+                if not self._allow_execution_rate_limit(approved.intent.market_id, approved.intent.action):
+                    continue
+            result = await self.execution_engine.execute(approved)
+            if approved.approved and result and result.accepted and approved.intent is not None:
                 self.repo.register_trade(approved.intent.mode.value)
+                order = OrderRecord(
+                    order_id=result.order_id or "",
+                    market_id=approved.intent.market_id,
+                    side=approved.intent.side,
+                    action=approved.intent.action,
+                    order_type=approved.intent.order_type,
+                    limit_price=approved.intent.limit_price,
+                    size_usd=approved.intent.size_usd,
+                    status=result.status,
+                    adapter=self.execution_engine.adapter.__class__.__name__,
+                    mode=approved.intent.mode,
+                    dry_run=result.dry_run,
+                    idempotency_key=approved.intent.idempotency_key,
+                    raw=result.raw,
+                )
+                self.repo.record_order(order)
+                fill = self._build_fill(order=order, signal=price_signal)
+                self.repo.record_fill(fill)
+                snapshot = self.repo.price_snapshots.get(order.market_id)
+                pf, attribution = self.portfolio_engine.apply_fill(pf, order, fill, snapshot=snapshot)
+                self._update_position_opened_at(order)
+                self.repo.record_positions_snapshot(pf)
+                save_fn = getattr(self.repo, "save_portfolio", None)
+                if callable(save_fn):
+                    save_fn()
+                self.repo.record_trade_log(
+                    {
+                        "ts": fill.ts.isoformat(),
+                        "market_id": order.market_id,
+                        "mode": order.mode.value,
+                        "action": order.action.value,
+                        "order_id": order.order_id,
+                        "fill_price": fill.fill_price,
+                        "fill_size": fill.fill_size,
+                        "fee": fill.fee,
+                        "pnl": attribution.actual_pnl,
+                        "theoretical_pnl": attribution.theoretical_pnl,
+                        "slippage": attribution.slippage,
+                        "spread_entry": attribution.spread_at_entry,
+                        "spread_exit": attribution.spread_at_exit,
+                        "reason_json": {"thesis": approved.intent.thesis, "risk_reason": approved.reason},
+                    }
+                )
                 executed += 1
+        self.sync_execution_compensations()
         return executed
+
+    def restore_execution_compensations(self) -> int:
+        stored = getattr(self.repo, "execution_compensations", {})
+        if not isinstance(stored, dict):
+            return 0
+        return self.execution_engine.load_compensations(stored)
+
+    def sync_execution_compensations(self) -> dict[str, int]:
+        pending = self.execution_engine.export_compensations()
+        stored = getattr(self.repo, "execution_compensations", {})
+        existing_keys = list(stored.keys()) if isinstance(stored, dict) else []
+        for key, intent in pending.items():
+            self.repo.upsert_execution_compensation(key, intent)
+        for key in existing_keys:
+            if key not in pending:
+                self.repo.delete_execution_compensation(key)
+        current = getattr(self.repo, "execution_compensations", {})
+        current_size = len(current) if isinstance(current, dict) else 0
+        return {"pending": len(pending), "stored": current_size}
+
+    async def reconcile_execution_state(self) -> PortfolioState:
+        balances, positions = await self.execution_engine.sync_account_state()
+        self.repo.portfolio.cash = balances.cash
+        self.repo.portfolio.equity = balances.equity
+        self.repo.portfolio.positions = [
+            Position(
+                market_id=pos.market_id,
+                side=pos.side,
+                size=pos.size,
+                avg_price=pos.avg_price,
+                u_pnl=pos.u_pnl,
+            )
+            for pos in positions
+        ]
+        self.repo.portfolio.unrealized_pnl = sum(p.u_pnl for p in self.repo.portfolio.positions)
+        self.repo.record_positions_snapshot(self.repo.portfolio)
+        save_fn = getattr(self.repo, "save_portfolio", None)
+        if callable(save_fn):
+            save_fn()
+        return self.repo.portfolio
+
+    async def reconcile_order_statuses(self, limit: int = 50) -> int:
+        terminal = {"filled", "cancelled", "rejected", "expired", "simulated", "simulated-filled"}
+        reconciled = 0
+        candidates = list(self.repo.order_records)[-max(limit, 1) :]
+        for order in candidates:
+            if order.status.lower() in terminal:
+                continue
+            try:
+                status = await self.execution_engine.fetch_order_status(order.order_id)
+            except Exception as exc:
+                logger.warning("order_reconcile_fetch_failed", order_id=order.order_id, error=str(exc))
+                continue
+
+            if status.status != order.status or status.raw:
+                if self.repo.update_order_status(order.order_id, status.status, raw=status.raw):
+                    reconciled += 1
+
+            if status.status.lower() != "filled":
+                continue
+            if self.repo.has_fill(order.order_id):
+                continue
+
+            fill = self._fill_from_order_status(order, status)
+            self.repo.record_fill(fill)
+            snapshot = self.repo.price_snapshots.get(order.market_id)
+            portfolio, attribution = self.portfolio_engine.apply_fill(self.repo.portfolio, order, fill, snapshot=snapshot)
+            self.repo.record_positions_snapshot(portfolio)
+            self._update_position_opened_at(order)
+            save_fn = getattr(self.repo, "save_portfolio", None)
+            if callable(save_fn):
+                save_fn()
+            self.repo.record_trade_log(
+                {
+                    "ts": fill.ts.isoformat(),
+                    "market_id": order.market_id,
+                    "mode": order.mode.value,
+                    "action": order.action.value,
+                    "order_id": order.order_id,
+                    "fill_price": fill.fill_price,
+                    "fill_size": fill.fill_size,
+                    "fee": fill.fee,
+                    "pnl": attribution.actual_pnl,
+                    "theoretical_pnl": attribution.theoretical_pnl,
+                    "slippage": attribution.slippage,
+                    "spread_entry": attribution.spread_at_entry,
+                    "spread_exit": attribution.spread_at_exit,
+                    "reason_json": {"source": "order_reconcile"},
+                }
+            )
+        return reconciled
+
+    def refresh_market_subscriptions(self) -> list[str]:
+        self.market_refresh()
+        ranked = sorted(self.repo.markets.values(), key=lambda card: card.market_score, reverse=True)
+        return [card.market_id for card in ranked[:10]]
+
+    def handle_market_tick(self, tick: NormalizedMarketTick) -> PriceSignal:
+        snapshot, signal = self.price_engine.on_quote(
+            market_id=tick.market_id,
+            best_bid=tick.best_bid,
+            best_ask=tick.best_ask,
+            last=tick.last,
+            volume_1m=tick.volume_1m,
+            trades_1m=tick.trades_1m,
+        )
+        snapshot.ts = tick.ts
+        signal.ts = tick.ts
+        self.repo.put_price_snapshot(snapshot)
+        self.repo.put_price_signal(signal)
+        self.repo.update_price_stream_state(last_event_ts=tick.ts)
+        self._trigger_anomaly_info_refresh_if_needed(signal, tick.ts)
+        return signal
+
+    async def run_price_stream(self, market_ids: list[str]) -> None:
+        if self.clob_client is None:
+            logger.warning("price_stream_skipped", reason="missing_clob_client")
+            return
+        self._price_stream_stop.clear()
+        self.repo.update_price_stream_state(
+            running=True,
+            reconnects=self.clob_client.reconnect_count,
+        )
+        active_market_ids = list(market_ids)
+        logger.info("price_stream_started", market_count=len(active_market_ids))
+
+        last_reconnect_count = self.clob_client.reconnect_count
+        dropped = 0
+        processed = 0
+        pending_ticks: dict[str, NormalizedMarketTick] = {}
+        window_start_ts: dict[str, datetime] = {}
+        try:
+            while not self._price_stream_stop.is_set():
+                if not active_market_ids:
+                    active_market_ids = self.refresh_market_subscriptions()
+                    if not active_market_ids:
+                        await asyncio.sleep(self.ws_backoff_base_seconds)
+                        continue
+                async for payload in self.clob_client.stream_orderbook(
+                    active_market_ids,
+                    max_retries=self.ws_max_retries,
+                    backoff_base_seconds=self.ws_backoff_base_seconds,
+                    backoff_max_seconds=self.ws_backoff_max_seconds,
+                    stale_timeout_seconds=self.ws_stale_timeout_seconds,
+                ):
+                    if self._price_stream_stop.is_set():
+                        break
+
+                    reconnects = self.clob_client.reconnect_count
+                    if reconnects > last_reconnect_count:
+                        await self._rest_backfill_after_reconnect(active_market_ids)
+                        last_reconnect_count = reconnects
+                        self.repo.update_price_stream_state(reconnects=reconnects)
+                        logger.warning("price_stream_reconnected", reconnects=reconnects)
+
+                    tick = self.clob_client.normalize_ws_event(payload)
+                    if tick is None:
+                        dropped += 1
+                        continue
+                    flushed = self._collect_and_flush_tick(
+                        tick=tick,
+                        pending_ticks=pending_ticks,
+                        window_start_ts=window_start_ts,
+                    )
+                    if flushed:
+                        processed += flushed
+                        self.repo.update_price_stream_state(
+                            reconnects=self.clob_client.reconnect_count,
+                            last_event_ts=tick.ts,
+                        )
+                    if processed > 0 and processed % 100 == 0:
+                        logger.info(
+                            "price_stream_progress",
+                            processed=processed,
+                            dropped=dropped,
+                            reconnects=self.clob_client.reconnect_count,
+                        )
+                if not self._price_stream_stop.is_set():
+                    processed += self._flush_pending_ticks(
+                        pending_ticks=pending_ticks,
+                        window_start_ts=window_start_ts,
+                    )
+                    active_market_ids = self.refresh_market_subscriptions() or active_market_ids
+                    logger.warning("price_stream_loop_restarting", reconnects=self.clob_client.reconnect_count)
+                    await asyncio.sleep(self.ws_backoff_base_seconds)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("price_stream_unhandled_error", error=str(exc))
+        finally:
+            processed += self._flush_pending_ticks(
+                pending_ticks=pending_ticks,
+                window_start_ts=window_start_ts,
+            )
+            self.repo.update_price_stream_state(
+                running=False,
+                reconnects=self.clob_client.reconnect_count if self.clob_client else 0,
+            )
+            logger.info("price_stream_stopped", processed=processed, dropped=dropped)
+
+    def request_price_stream_stop(self) -> None:
+        self._price_stream_stop.set()
+
+    def _trigger_anomaly_info_refresh_if_needed(self, signal: PriceSignal, event_ts: datetime) -> None:
+        if not signal.anomaly_flag:
+            return
+        now_ts = event_ts if event_ts.tzinfo is not None else event_ts.replace(tzinfo=timezone.utc)
+        if self._last_anomaly_refresh_ts is None:
+            should_refresh = True
+        else:
+            elapsed = (now_ts - self._last_anomaly_refresh_ts).total_seconds()
+            should_refresh = elapsed >= self.anomaly_debounce_seconds
+        if should_refresh:
+            self.info_refresh(anomaly_only=True)
+            self._last_anomaly_refresh_ts = now_ts
+
+    async def _rest_backfill_after_reconnect(self, market_ids: list[str]) -> None:
+        if self.clob_client is None:
+            return
+        for market_id in market_ids:
+            try:
+                payload = await self.clob_client.fetch_top_of_book(market_id)
+            except Exception as exc:
+                logger.warning("price_stream_backfill_failed", market_id=market_id, error=str(exc))
+                continue
+            if not isinstance(payload, dict):
+                continue
+            fallback_payload = {
+                "type": "book",
+                "market_id": market_id,
+                "best_bid": payload.get("best_bid") or payload.get("bid"),
+                "best_ask": payload.get("best_ask") or payload.get("ask"),
+                "last": payload.get("last") or payload.get("mid") or payload.get("price"),
+                "volume_1m": payload.get("volume_1m") or 0.0,
+                "trades_1m": payload.get("trades_1m") or 0,
+                "ts": payload.get("ts"),
+            }
+            tick = self.clob_client.normalize_ws_event(fallback_payload)
+            if tick is not None:
+                self.handle_market_tick(tick)
+
+    def _collect_and_flush_tick(
+        self,
+        *,
+        tick: NormalizedMarketTick,
+        pending_ticks: dict[str, NormalizedMarketTick],
+        window_start_ts: dict[str, datetime],
+    ) -> int:
+        market_id = tick.market_id
+        if market_id not in window_start_ts:
+            window_start_ts[market_id] = tick.ts
+        pending_ticks[market_id] = tick
+
+        if self.price_flush_seconds <= 0:
+            self.handle_market_tick(pending_ticks.pop(market_id))
+            window_start_ts[market_id] = tick.ts
+            return 1
+
+        elapsed = (tick.ts - window_start_ts[market_id]).total_seconds()
+        if elapsed >= self.price_flush_seconds:
+            self.handle_market_tick(pending_ticks.pop(market_id))
+            window_start_ts[market_id] = tick.ts
+            return 1
+        return 0
+
+    def _flush_pending_ticks(
+        self,
+        *,
+        pending_ticks: dict[str, NormalizedMarketTick],
+        window_start_ts: dict[str, datetime],
+    ) -> int:
+        if not pending_ticks:
+            return 0
+        flushed = 0
+        for market_id, tick in list(pending_ticks.items()):
+            self.handle_market_tick(tick)
+            flushed += 1
+            pending_ticks.pop(market_id, None)
+            window_start_ts[market_id] = tick.ts
+        return flushed
+
+    def _position_context(self, portfolio: PortfolioState, market_id: str) -> tuple[float, float | None, int]:
+        for pos in portfolio.positions:
+            if pos.market_id != market_id:
+                continue
+            key = self._position_key(market_id, pos.side.value)
+            opened_at = self._position_opened_at.get(key)
+            if opened_at is None:
+                opened_at = datetime.now(timezone.utc)
+                self._position_opened_at[key] = opened_at
+            held_minutes = int(max(0.0, (datetime.now(timezone.utc) - opened_at).total_seconds() // 60))
+            return pos.size, pos.avg_price, held_minutes
+        return 0.0, None, 0
+
+    def _allow_execution_rate_limit(self, market_id: str, action: Action) -> bool:
+        if action == Action.CLOSE:
+            return True
+        now = self._now_fn()
+        cutoff = now - timedelta(seconds=60)
+        market_tape = self._market_order_tape[market_id]
+        while market_tape and market_tape[0] < cutoff:
+            market_tape.popleft()
+        while self._global_order_tape and self._global_order_tape[0] < cutoff:
+            self._global_order_tape.popleft()
+        if len(market_tape) >= self.execution_rate_limit_per_market_per_minute:
+            return False
+        if len(self._global_order_tape) >= self.execution_rate_limit_global_per_minute:
+            return False
+        market_tape.append(now)
+        self._global_order_tape.append(now)
+        return True
+
+    @staticmethod
+    def _build_fill(order: OrderRecord, signal: PriceSignal) -> FillRecord:
+        fill_price = order.limit_price if order.limit_price is not None else signal.mid
+        fill_price = float(fill_price if fill_price > 0 else signal.mid if signal.mid > 0 else 0.5)
+        fill_size = order.size_usd / max(fill_price, 1e-9)
+        raw_fee = order.raw.get("fee") if isinstance(order.raw, dict) else None
+        try:
+            fee = float(raw_fee) if raw_fee is not None else 0.0
+        except (TypeError, ValueError):
+            fee = 0.0
+        return FillRecord(
+            order_id=order.order_id,
+            market_id=order.market_id,
+            fill_price=fill_price,
+            fill_size=fill_size,
+            fee=fee,
+            raw={"source": "runtime_synthetic_fill"},
+        )
+
+    @staticmethod
+    def _fill_from_order_status(order: OrderRecord, status: OrderStatus) -> FillRecord:
+        raw = status.raw if isinstance(status.raw, dict) else {}
+        fill_price = RuntimeOrchestrator._float_or_none(raw.get("fill_price")) or RuntimeOrchestrator._float_or_none(
+            raw.get("price")
+        )
+        if fill_price is None:
+            fill_price = order.limit_price if order.limit_price is not None else 0.5
+        fill_size = RuntimeOrchestrator._float_or_none(raw.get("fill_size")) or RuntimeOrchestrator._float_or_none(
+            raw.get("size")
+        )
+        if fill_size is None:
+            fill_size = order.size_usd / max(fill_price, 1e-9)
+        fee = RuntimeOrchestrator._float_or_none(raw.get("fee")) or 0.0
+        return FillRecord(
+            order_id=order.order_id,
+            market_id=order.market_id,
+            fill_price=float(fill_price),
+            fill_size=float(fill_size),
+            fee=float(fee),
+            raw={"source": "order_reconcile", "status_raw": raw},
+        )
+
+    def _update_position_opened_at(self, order: OrderRecord) -> None:
+        key = self._position_key(order.market_id, order.side.value)
+        if order.action.value == "OPEN":
+            self._position_opened_at[key] = datetime.now(timezone.utc)
+            return
+        still_open = any(
+            p.market_id == order.market_id and p.side.value == order.side.value and p.size > 0
+            for p in self.repo.portfolio.positions
+        )
+        if not still_open:
+            self._position_opened_at.pop(key, None)
+
+    @staticmethod
+    def _position_key(market_id: str, side: str) -> str:
+        return f"{market_id}:{side}"
+
+    @staticmethod
+    def _float_or_none(value: object) -> float | None:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None

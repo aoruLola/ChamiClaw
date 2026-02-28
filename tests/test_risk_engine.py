@@ -100,3 +100,21 @@ def test_risk_rollover_day_resets_day_scoped_state():
     assert portfolio.max_drawdown_pct == 0.0
     assert portfolio.per_market_drawdown_pct == {}
     assert portfolio.pause_until is None
+
+
+def test_risk_allows_close_orders_during_halt():
+    risk = RiskEngine()
+    portfolio = PortfolioState(equity=10_000, daily_halt=True, consecutive_losses=9)
+    close_intent = OrderIntent(
+        market_id="m1",
+        side=Side.YES,
+        action=Action.CLOSE,
+        order_type=OrderType.LIMIT,
+        limit_price=0.5,
+        size_usd=500.0,
+        mode=OrderMode.A,
+        thesis="force-exit",
+    )
+    approved = risk.validate(close_intent, portfolio)
+    assert approved.approved is True
+    assert approved.reason == "approved_close"
