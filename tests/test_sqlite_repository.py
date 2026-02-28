@@ -313,3 +313,24 @@ def test_sqlite_repository_persists_execution_compensations(tmp_path):
     assert "intent-xyz" in repo2.execution_compensations
     assert repo2.execution_compensations["intent-xyz"].market_id == "m1"
     repo2.close()
+
+
+def test_sqlite_repository_trade_logs_restore_as_dict_payload(tmp_path):
+    db = tmp_path / "trade_logs_persist.db"
+    repo = SqliteRepository(str(db))
+    repo.record_trade_log(
+        {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "market_id": "m1",
+            "mode": "A",
+            "action": "CLOSE",
+            "pnl": 1.23,
+        }
+    )
+    repo.close()
+
+    repo2 = SqliteRepository(str(db))
+    assert len(repo2.trade_logs) == 1
+    assert repo2.trade_logs[0]["market_id"] == "m1"
+    assert float(repo2.trade_logs[0]["pnl"]) == 1.23
+    repo2.close()

@@ -11,12 +11,15 @@ from chamiclaw.core.models import (
     InfoSignal,
     MarketCard,
     ModeState,
+    OptimizationTrial,
     OrderIntent,
     OrderRecord,
+    ParamsVersion,
     PhaseGateState,
     PortfolioState,
     PriceSignal,
     PriceSnapshot,
+    StrategyParams,
     TradeStats,
 )
 from chamiclaw.core.settings import AppSettings
@@ -36,6 +39,9 @@ class Repository(Protocol):
     trade_logs: list[dict]
     positions_snapshots: list[PortfolioState]
     execution_compensations: dict[str, OrderIntent]
+    strategy_params_current: ParamsVersion
+    strategy_params_history: list[ParamsVersion]
+    optimization_trials: list[OptimizationTrial]
     price_stream_running: bool
     price_stream_last_event_ts: datetime | None
     price_stream_reconnects: int
@@ -78,6 +84,33 @@ class Repository(Protocol):
 
     def metrics_summary(self) -> dict[str, float]: ...
 
+    def get_current_params(self) -> ParamsVersion: ...
+
+    def get_params_version(self, version_id: str) -> ParamsVersion | None: ...
+
+    def save_params_version(
+        self,
+        params: StrategyParams,
+        *,
+        source: str = "system",
+        score: float | None = None,
+        make_current: bool = True,
+    ) -> ParamsVersion: ...
+
+    def set_current_params_version(self, version_id: str) -> ParamsVersion | None: ...
+
+    def save_optimization_trial(self, trial: OptimizationTrial) -> None: ...
+
+    def optimization_leaderboard(self, limit: int = 20) -> list[OptimizationTrial]: ...
+
+    def save_optimization_meta(
+        self,
+        *,
+        decline_streak: int,
+        last_applied_score: float | None,
+        last_applied_version_id: str,
+    ) -> None: ...
+
     def update_price_stream_state(
         self,
         *,
@@ -110,6 +143,13 @@ class InMemoryRepository:
         self.trade_logs: list[dict] = []
         self.positions_snapshots: list[PortfolioState] = []
         self.execution_compensations: dict[str, OrderIntent] = {}
+        self.strategy_params_history: list[ParamsVersion] = []
+        self.strategy_params_current = ParamsVersion(source="bootstrap", params=StrategyParams())
+        self.strategy_params_history.append(self.strategy_params_current.model_copy(deep=True))
+        self.optimization_trials: list[OptimizationTrial] = []
+        self.optimization_decline_streak: int = 0
+        self.optimization_last_applied_score: float | None = None
+        self.optimization_last_applied_version_id: str = self.strategy_params_current.version_id
         self.price_signal_events: list[PriceSignal] = []
         self.mode_state_events: list[ModeState] = []
         self.price_stream_running: bool = False
@@ -140,10 +180,10 @@ class InMemoryRepository:
         if self.trade_stats.total_trades > 0:
             self.portfolio.b_trade_share = self.trade_stats.b_trades / self.trade_stats.total_trades
         if realized_pnl is not None:
-            if realized_pnl >= 0:
+            if realized_pnl > 0:
                 self.trade_stats.wins += 1
                 self.trade_stats.gross_profit += realized_pnl
-            else:
+            elif realized_pnl < 0:
                 self.trade_stats.losses += 1
                 self.trade_stats.gross_loss += abs(realized_pnl)
             if self.trade_stats.wins > 0:
@@ -265,12 +305,14 @@ class InMemoryRepository:
         }
 
     def metrics_summary(self) -> dict[str, float]:
-        if self.trade_stats.total_trades <= 0:
+        realized_trades = self.trade_stats.wins + self.trade_stats.losses
+        win_rate_denominator = realized_trades if realized_trades > 0 else self.trade_stats.total_trades
+        if win_rate_denominator <= 0:
             win_rate = 0.0
             b_share = 0.0
         else:
-            win_rate = self.trade_stats.wins / self.trade_stats.total_trades
-            b_share = self.trade_stats.b_trades / self.trade_stats.total_trades
+            win_rate = self.trade_stats.wins / win_rate_denominator
+            b_share = self.trade_stats.b_trades / self.trade_stats.total_trades if self.trade_stats.total_trades > 0 else 0.0
         rr = (
             self.trade_stats.gross_profit / self.trade_stats.gross_loss
             if self.trade_stats.gross_loss > 0
@@ -283,6 +325,57 @@ class InMemoryRepository:
             "total_trades": float(self.trade_stats.total_trades),
             "b_trade_share": b_share,
         }
+
+    def get_current_params(self) -> ParamsVersion:
+        return self.strategy_params_current.model_copy(deep=True)
+
+    def get_params_version(self, version_id: str) -> ParamsVersion | None:
+        for item in self.strategy_params_history:
+            if item.version_id == version_id:
+                return item.model_copy(deep=True)
+        return None
+
+    def save_params_version(
+        self,
+        params: StrategyParams,
+        *,
+        source: str = "system",
+        score: float | None = None,
+        make_current: bool = True,
+    ) -> ParamsVersion:
+        item = ParamsVersion(source=source, score=score, params=params.model_copy(deep=True))
+        self.strategy_params_history.append(item.model_copy(deep=True))
+        if make_current:
+            self.strategy_params_current = item.model_copy(deep=True)
+            self.optimization_last_applied_version_id = item.version_id
+        return item
+
+    def set_current_params_version(self, version_id: str) -> ParamsVersion | None:
+        item = self.get_params_version(version_id)
+        if item is None:
+            return None
+        self.strategy_params_current = item.model_copy(deep=True)
+        self.optimization_last_applied_version_id = item.version_id
+        return self.strategy_params_current.model_copy(deep=True)
+
+    def save_optimization_trial(self, trial: OptimizationTrial) -> None:
+        self.optimization_trials.append(trial.model_copy(deep=True))
+
+    def optimization_leaderboard(self, limit: int = 20) -> list[OptimizationTrial]:
+        ordered = sorted(self.optimization_trials, key=lambda item: item.score, reverse=True)
+        top = ordered[: max(limit, 0)]
+        return [item.model_copy(deep=True) for item in top]
+
+    def save_optimization_meta(
+        self,
+        *,
+        decline_streak: int,
+        last_applied_score: float | None,
+        last_applied_version_id: str,
+    ) -> None:
+        self.optimization_decline_streak = max(decline_streak, 0)
+        self.optimization_last_applied_score = last_applied_score
+        self.optimization_last_applied_version_id = last_applied_version_id
 
     def update_price_stream_state(
         self,
@@ -316,6 +409,10 @@ class InMemoryRepository:
         self.trade_logs.clear()
         self.positions_snapshots.clear()
         self.execution_compensations.clear()
+        self.optimization_trials.clear()
+        self.optimization_decline_streak = 0
+        self.optimization_last_applied_score = None
+        self.optimization_last_applied_version_id = self.strategy_params_current.version_id
         self.price_signal_events.clear()
         self.mode_state_events.clear()
         self.price_stream_running = False
@@ -340,6 +437,7 @@ class InMemoryRepository:
             "fills": len(self.fill_records),
             "positions_snapshots": len(self.positions_snapshots),
             "execution_compensations": len(self.execution_compensations),
+            "optimization_trials": len(self.optimization_trials),
             "trade_stats_total": self.trade_stats.total_trades,
             "trade_stats_b": self.trade_stats.b_trades,
             "daily_halt": int(self.portfolio.daily_halt),
@@ -412,6 +510,16 @@ class SqliteRepository(InMemoryRepository):
               idempotency_key TEXT PRIMARY KEY,
               payload TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS params_versions (
+              version_id TEXT PRIMARY KEY,
+              created_at TEXT NOT NULL,
+              payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS optimization_trials (
+              trial_id TEXT PRIMARY KEY,
+              created_at TEXT NOT NULL,
+              payload TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS price_signal_events (
               ts TEXT NOT NULL,
               market_id TEXT NOT NULL,
@@ -428,6 +536,7 @@ class SqliteRepository(InMemoryRepository):
             CREATE INDEX IF NOT EXISTS idx_positions_snapshots_ts ON positions_snapshots(ts);
             CREATE INDEX IF NOT EXISTS idx_price_signal_events_ts ON price_signal_events(ts);
             CREATE INDEX IF NOT EXISTS idx_mode_state_events_ts ON mode_state_events(ts);
+            CREATE INDEX IF NOT EXISTS idx_optimization_trials_created_at ON optimization_trials(created_at);
             """
         )
         self._conn.commit()
@@ -454,6 +563,34 @@ class SqliteRepository(InMemoryRepository):
         if row:
             self.phase_gate_state = PhaseGateState.model_validate_json(row["value"])
             self.portfolio.phase = self.phase_gate_state.phase
+        row = self._conn.execute("SELECT value FROM kv_state WHERE key='strategy_params_current'").fetchone()
+        if row:
+            self.strategy_params_current = ParamsVersion.model_validate_json(row["value"])
+            self.optimization_last_applied_version_id = self.strategy_params_current.version_id
+        self.strategy_params_history = []
+        for row in self._conn.execute("SELECT payload FROM params_versions ORDER BY created_at"):
+            self.strategy_params_history.append(ParamsVersion.model_validate_json(row["payload"]))
+        if not self.strategy_params_history:
+            self.strategy_params_history = [self.strategy_params_current.model_copy(deep=True)]
+            self._conn.execute(
+                "INSERT OR REPLACE INTO params_versions (version_id, created_at, payload) VALUES (?,?,?)",
+                (
+                    self.strategy_params_current.version_id,
+                    self.strategy_params_current.created_at.isoformat(),
+                    self.strategy_params_current.model_dump_json(),
+                ),
+            )
+            self._set_kv("strategy_params_current", self.strategy_params_current.model_dump_json())
+        row = self._conn.execute("SELECT value FROM kv_state WHERE key='optimization_meta'").fetchone()
+        if row:
+            payload = json.loads(row["value"])
+            self.optimization_decline_streak = int(payload.get("decline_streak", 0))
+            self.optimization_last_applied_score = (
+                float(payload["last_applied_score"]) if payload.get("last_applied_score") is not None else None
+            )
+            self.optimization_last_applied_version_id = str(
+                payload.get("last_applied_version_id", self.optimization_last_applied_version_id)
+            )
         row = self._conn.execute("SELECT value FROM kv_state WHERE key='price_stream_state'").fetchone()
         if row:
             payload = json.loads(row["value"])
@@ -471,13 +608,20 @@ class SqliteRepository(InMemoryRepository):
         for row in self._conn.execute("SELECT payload FROM fills ORDER BY ts"):
             self.fill_records.append(FillRecord.model_validate_json(row["payload"]))
         for row in self._conn.execute("SELECT payload FROM trade_logs ORDER BY ts"):
-            self.trade_logs.append({"payload": row["payload"]})
+            raw_payload = row["payload"]
+            try:
+                parsed = json.loads(raw_payload)
+                self.trade_logs.append(parsed if isinstance(parsed, dict) else {"payload": parsed})
+            except json.JSONDecodeError:
+                self.trade_logs.append({"payload_raw": raw_payload})
         for row in self._conn.execute("SELECT payload FROM positions_snapshots ORDER BY ts"):
             self.positions_snapshots.append(PortfolioState.model_validate_json(row["payload"]))
         for row in self._conn.execute(
             "SELECT idempotency_key,payload FROM execution_compensations ORDER BY idempotency_key"
         ):
             self.execution_compensations[row["idempotency_key"]] = OrderIntent.model_validate_json(row["payload"])
+        for row in self._conn.execute("SELECT payload FROM optimization_trials ORDER BY created_at"):
+            self.optimization_trials.append(OptimizationTrial.model_validate_json(row["payload"]))
         for row in self._conn.execute("SELECT payload FROM price_signal_events ORDER BY ts"):
             self.price_signal_events.append(PriceSignal.model_validate_json(row["payload"]))
         for row in self._conn.execute("SELECT payload FROM mode_state_events ORDER BY ts"):
@@ -560,6 +704,69 @@ class SqliteRepository(InMemoryRepository):
         }
         self._set_kv("price_stream_state", json.dumps(payload))
 
+    def get_current_params(self) -> ParamsVersion:
+        return super().get_current_params()
+
+    def get_params_version(self, version_id: str) -> ParamsVersion | None:
+        return super().get_params_version(version_id)
+
+    def save_params_version(
+        self,
+        params: StrategyParams,
+        *,
+        source: str = "system",
+        score: float | None = None,
+        make_current: bool = True,
+    ) -> ParamsVersion:
+        item = super().save_params_version(params, source=source, score=score, make_current=make_current)
+        self._conn.execute(
+            "INSERT OR REPLACE INTO params_versions (version_id, created_at, payload) VALUES (?,?,?)",
+            (item.version_id, item.created_at.isoformat(), item.model_dump_json()),
+        )
+        if make_current:
+            self._set_kv("strategy_params_current", item.model_dump_json())
+        else:
+            self._conn.commit()
+        return item
+
+    def set_current_params_version(self, version_id: str) -> ParamsVersion | None:
+        item = super().set_current_params_version(version_id)
+        if item is None:
+            return None
+        self._set_kv("strategy_params_current", item.model_dump_json())
+        return item
+
+    def save_optimization_trial(self, trial: OptimizationTrial) -> None:
+        super().save_optimization_trial(trial)
+        item = self.optimization_trials[-1]
+        self._conn.execute(
+            "INSERT OR REPLACE INTO optimization_trials (trial_id, created_at, payload) VALUES (?,?,?)",
+            (item.trial_id, item.created_at.isoformat(), item.model_dump_json()),
+        )
+        self._conn.commit()
+
+    def optimization_leaderboard(self, limit: int = 20) -> list[OptimizationTrial]:
+        return super().optimization_leaderboard(limit=limit)
+
+    def save_optimization_meta(
+        self,
+        *,
+        decline_streak: int,
+        last_applied_score: float | None,
+        last_applied_version_id: str,
+    ) -> None:
+        super().save_optimization_meta(
+            decline_streak=decline_streak,
+            last_applied_score=last_applied_score,
+            last_applied_version_id=last_applied_version_id,
+        )
+        payload = {
+            "decline_streak": self.optimization_decline_streak,
+            "last_applied_score": self.optimization_last_applied_score,
+            "last_applied_version_id": self.optimization_last_applied_version_id,
+        }
+        self._set_kv("optimization_meta", json.dumps(payload))
+
     def record_order(self, order: OrderRecord) -> None:
         super().record_order(order)
         self._conn.execute(
@@ -602,7 +809,11 @@ class SqliteRepository(InMemoryRepository):
         super().record_trade_log(payload)
         self._conn.execute(
             "INSERT INTO trade_logs (ts,market_id,payload) VALUES (?,?,?)",
-            (str(payload.get("ts", "")), str(payload.get("market_id", "")), str(payload)),
+            (
+                str(payload.get("ts", "")),
+                str(payload.get("market_id", "")),
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str),
+            ),
         )
         self._conn.commit()
 
@@ -652,6 +863,7 @@ class SqliteRepository(InMemoryRepository):
         self._conn.execute("DELETE FROM trade_logs")
         self._conn.execute("DELETE FROM positions_snapshots")
         self._conn.execute("DELETE FROM execution_compensations")
+        self._conn.execute("DELETE FROM optimization_trials")
         self._conn.execute("DELETE FROM price_signal_events")
         self._conn.execute("DELETE FROM mode_state_events")
         self._conn.commit()
@@ -659,6 +871,11 @@ class SqliteRepository(InMemoryRepository):
             self._set_kv("trade_stats", self.trade_stats.model_dump_json())
         if clear_portfolio_controls:
             self.save_portfolio()
+        self.save_optimization_meta(
+            decline_streak=self.optimization_decline_streak,
+            last_applied_score=self.optimization_last_applied_score,
+            last_applied_version_id=self.optimization_last_applied_version_id,
+        )
         return payload
 
     def close(self) -> None:

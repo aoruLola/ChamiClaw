@@ -20,6 +20,7 @@ from chamiclaw.core.models import (
     Position,
     PositionSnapshot,
     BalanceSnapshot,
+    ExecutionResult,
     PriceSnapshot,
     PriceSignal,
     Side,
@@ -29,6 +30,7 @@ from chamiclaw.engines.execution import ExecutionEngine
 from chamiclaw.engines.info import InfoEngine
 from chamiclaw.engines.market import MarketService
 from chamiclaw.engines.mode import ModeEngine
+from chamiclaw.engines.phase_gate import PhaseGateService
 from chamiclaw.engines.price import PriceEngine
 from chamiclaw.engines.risk import RiskEngine
 from chamiclaw.engines.strategy import StrategyEngine
@@ -177,6 +179,85 @@ def test_runtime_strategy_loop_closes_existing_position_and_realizes_pnl():
     assert len(repo.fill_records) == 1
     assert repo.portfolio.positions == []
     assert repo.portfolio.realized_pnl > 0
+    assert repo.trade_stats.total_trades == 1
+    assert repo.trade_stats.wins == 1
+    assert repo.trade_stats.losses == 0
+    assert repo.trade_stats.gross_profit > 0
+    assert repo.trade_stats.gross_loss == 0
+
+
+def test_runtime_strategy_loop_closes_existing_no_position_with_no_side():
+    repo = InMemoryRepository()
+    repo.portfolio.positions = [Position(market_id="m1", side=Side.NO, size=100.0, avg_price=0.50, u_pnl=0.0)]
+    repo.portfolio.cash = 9_950.0
+    repo.portfolio.equity = 10_000.0
+    repo.put_mode_state(ModeState(market_id="m1", mode=Mode.MODE_A))
+    repo.put_price_signal(
+        PriceSignal(
+            market_id="m1",
+            change_5m=-0.02,
+            vol_ratio_15m=1.3,
+            spread=0.01,
+            mid=0.48,
+            spread_status=SpreadStatus.stable,
+        )
+    )
+
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        price_engine=PriceEngine(),
+        clob_client=CLOBClient(rest_url="https://rest", ws_url="wss://ws"),
+    )
+
+    executed = asyncio.run(orchestrator.strategy_loop())
+
+    assert executed == 1
+    assert len(repo.order_records) == 1
+    assert repo.order_records[0].action == Action.CLOSE
+    assert repo.order_records[0].side == Side.NO
+
+
+def test_runtime_strategy_loop_auto_evaluates_phase_gate_after_trade():
+    repo = InMemoryRepository()
+    repo.phase_gate_state.allowed_mode_b = False
+    repo.portfolio.positions = [Position(market_id="m1", side=Side.YES, size=100.0, avg_price=0.50, u_pnl=0.0)]
+    repo.portfolio.cash = 9_950.0
+    repo.portfolio.equity = 10_000.0
+    repo.put_mode_state(ModeState(market_id="m1", mode=Mode.MODE_A))
+    repo.put_price_signal(
+        PriceSignal(
+            market_id="m1",
+            change_5m=0.02,
+            vol_ratio_15m=1.3,
+            spread=0.01,
+            mid=0.52,
+            spread_status=SpreadStatus.stable,
+        )
+    )
+    gate = PhaseGateService(min_trades=1, min_win_rate=0.0, min_rr=0.0, max_drawdown=1.0)
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        phase_gate_service=gate,
+        price_engine=PriceEngine(),
+        clob_client=CLOBClient(rest_url="https://rest", ws_url="wss://ws"),
+    )
+
+    executed = asyncio.run(orchestrator.strategy_loop())
+
+    assert executed == 1
+    assert repo.phase_gate_state.allowed_mode_b is True
 
 
 def test_runtime_reconcile_execution_state_updates_portfolio_and_snapshots():
@@ -592,3 +673,60 @@ def test_runtime_can_sync_and_restore_execution_compensations():
 
     assert restored == 1
     assert synced["pending"] == 1
+
+
+def test_runtime_apply_execution_result_records_trade_and_evaluates_phase_gate():
+    repo = InMemoryRepository()
+    repo.phase_gate_state.allowed_mode_b = False
+    repo.portfolio.positions = [Position(market_id="m1", side=Side.YES, size=100.0, avg_price=0.50, u_pnl=0.0)]
+    repo.portfolio.cash = 9_950.0
+    repo.portfolio.equity = 10_000.0
+    gate = PhaseGateService(min_trades=1, min_win_rate=0.0, min_rr=0.0, max_drawdown=1.0)
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        phase_gate_service=gate,
+        price_engine=PriceEngine(),
+        clob_client=CLOBClient(rest_url="https://rest", ws_url="wss://ws"),
+    )
+
+    intent = OrderIntent(
+        market_id="m1",
+        side=Side.YES,
+        action=Action.CLOSE,
+        order_type=OrderType.LIMIT,
+        limit_price=0.52,
+        size_usd=52.0,
+        mode=OrderMode.A,
+        thesis="test-close",
+    )
+    result = ExecutionResult(accepted=True, order_id="o-close", status="simulated", dry_run=True)
+    signal = PriceSignal(
+        market_id="m1",
+        spread=0.01,
+        change_5m=0.02,
+        vol_ratio_15m=1.3,
+        mid=0.52,
+        spread_status=SpreadStatus.stable,
+    )
+
+    updated = orchestrator.apply_execution_result(
+        intent=intent,
+        result=result,
+        signal=signal,
+        portfolio=repo.portfolio,
+        risk_reason="approved",
+    )
+
+    assert updated.positions == []
+    assert len(repo.order_records) == 1
+    assert len(repo.fill_records) == 1
+    assert len(repo.trade_logs) == 1
+    assert repo.trade_stats.total_trades == 1
+    assert repo.trade_stats.wins == 1
+    assert repo.phase_gate_state.allowed_mode_b is True

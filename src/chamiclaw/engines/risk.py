@@ -73,5 +73,6 @@ class RiskEngine:
         portfolio.consecutive_losses = 0
         portfolio.max_drawdown_pct = 0.0
         portfolio.per_market_drawdown_pct.clear()
+        portfolio.per_market_realized_pnl.clear()
         portfolio.pause_until = None
         return portfolio

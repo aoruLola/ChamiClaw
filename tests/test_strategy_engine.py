@@ -94,3 +94,87 @@ def test_strategy_does_not_open_new_position_when_existing_position_not_exiting(
         held_minutes=10,
     )
     assert intent is None
+
+
+def test_strategy_mode_a_uses_no_side_for_negative_signal():
+    engine = StrategyEngine()
+    mode_state = ModeState(market_id="m1", mode=Mode.MODE_A)
+    signal = PriceSignal(
+        market_id="m1",
+        spread=0.01,
+        change_5m=-0.02,
+        vol_ratio_15m=1.5,
+        mid=0.4,
+        spread_status=SpreadStatus.stable,
+    )
+
+    intent = engine.generate_intent(10_000, mode_state, signal)
+    assert intent is not None
+    assert intent.side.value == "NO"
+
+
+def test_strategy_mode_b_uses_no_side_for_negative_signal():
+    engine = StrategyEngine()
+    mode_state = ModeState(market_id="m1", mode=Mode.MODE_B_ALLOWED)
+    signal = PriceSignal(
+        market_id="m1",
+        change_15m=-0.04,
+        vol_ratio_15m=2.3,
+        breakout_15m=True,
+        mid=0.45,
+    )
+
+    intent = engine.generate_intent(10_000, mode_state, signal)
+    assert intent is not None
+    assert intent.side.value == "NO"
+
+
+def test_strategy_close_preserves_existing_position_side():
+    engine = StrategyEngine()
+    mode_state = ModeState(market_id="m1", mode=Mode.MODE_A)
+    signal = PriceSignal(
+        market_id="m1",
+        spread=0.01,
+        change_5m=-0.02,
+        vol_ratio_15m=1.5,
+        mid=0.49,
+        spread_status=SpreadStatus.stable,
+    )
+
+    intent = engine.generate_intent(
+        10_000,
+        mode_state,
+        signal,
+        position_size=100.0,
+        position_avg_price=0.5,
+        held_minutes=50,
+        position_side="NO",
+    )
+    assert intent is not None
+    assert intent.action.value == "CLOSE"
+    assert intent.side.value == "NO"
+
+
+def test_strategy_does_not_close_no_position_on_small_favorable_move():
+    engine = StrategyEngine()
+    mode_state = ModeState(market_id="m1", mode=Mode.MODE_A)
+    signal = PriceSignal(
+        market_id="m1",
+        spread=0.01,
+        change_5m=-0.01,
+        vol_ratio_15m=1.5,
+        mid=0.4955,
+        spread_status=SpreadStatus.stable,
+    )
+
+    intent = engine.generate_intent(
+        10_000,
+        mode_state,
+        signal,
+        position_size=100.0,
+        position_avg_price=0.5,
+        held_minutes=10,
+        position_side="NO",
+    )
+
+    assert intent is None

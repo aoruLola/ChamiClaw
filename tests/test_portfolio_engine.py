@@ -107,3 +107,38 @@ def test_portfolio_engine_apply_close_fill_realizes_pnl_and_clears_position():
     assert updated.daily_pnl > 0
     assert attr.actual_pnl > 0
     assert attr.spread_at_exit == 0.02
+
+
+def test_portfolio_engine_updates_per_market_drawdown_on_losing_close():
+    engine = PortfolioEngine()
+    portfolio = PortfolioState(equity=10_000, cash=10_000)
+    portfolio.positions = [Position(market_id="m1", side=Side.YES, size=100.0, avg_price=0.60, u_pnl=0.0)]
+    order = OrderRecord(
+        order_id="o-loss",
+        market_id="m1",
+        side=Side.YES,
+        action=Action.CLOSE,
+        order_type=OrderType.LIMIT,
+        limit_price=0.50,
+        size_usd=50.0,
+        status="filled",
+        adapter="SimmerAdapter",
+        mode=OrderMode.A,
+        dry_run=True,
+    )
+    fill = FillRecord(order_id="o-loss", market_id="m1", fill_price=0.50, fill_size=100.0, fee=1.0)
+    snapshot = PriceSnapshot(
+        market_id="m1",
+        best_bid=0.49,
+        best_ask=0.51,
+        mid=0.50,
+        spread=0.02,
+        last=0.50,
+        volume_1m=0.0,
+        trades_1m=0,
+    )
+
+    updated, _ = engine.apply_fill(portfolio, order, fill, snapshot=snapshot)
+
+    assert updated.realized_pnl < 0
+    assert updated.per_market_drawdown_pct.get("m1", 0.0) > 0
