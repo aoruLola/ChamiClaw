@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chamiclaw"
-version = "0.1.0"
+version = "0.4.0"
 description = "Minute-level Polymarket quant system (Gamma + self-built market data + Brave info + Simmer execution)"
 readme = "README.md"
 requires-python = ">=3.12"

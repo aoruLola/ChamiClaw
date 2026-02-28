@@ -25,8 +25,38 @@ class StrategyEngine:
         mode_state: ModeState,
         signal: PriceSignal,
         trade_stats: TradeStats | None = None,
+        *,
+        position_size: float = 0.0,
+        position_avg_price: float | None = None,
+        held_minutes: int = 0,
+        allow_mode_b: bool = True,
     ) -> OrderIntent | None:
         if mode_state.mode == Mode.NO_TRADE:
+            return None
+
+        # Exit rules are evaluated first when a position is already open.
+        if position_size > 0 and position_avg_price and position_avg_price > 0:
+            ret = (signal.mid - position_avg_price) / position_avg_price
+            if mode_state.mode == Mode.MODE_A:
+                should_close = ret >= 0.01 or ret <= -0.008 or held_minutes >= 45
+                thesis = "MODE_A exit tp/sl/timestop"
+                exit_mode = OrderMode.A
+            else:
+                should_close = ret >= 0.03 or ret <= -0.015 or held_minutes >= 90
+                thesis = "MODE_B exit tp/sl/timestop"
+                exit_mode = OrderMode.B
+            if should_close:
+                return OrderIntent(
+                    market_id=signal.market_id,
+                    side=Side.YES,
+                    action=Action.CLOSE,
+                    order_type=OrderType.LIMIT,
+                    limit_price=signal.mid,
+                    size_usd=position_size * signal.mid,
+                    mode=exit_mode,
+                    thesis=thesis,
+                    ttl_seconds=60,
+                )
             return None
 
         if mode_state.mode == Mode.MODE_A:
@@ -49,6 +79,9 @@ class StrategyEngine:
                 thesis="MODE_A mean-reversion/flow entry",
                 ttl_seconds=60,
             )
+
+        if not allow_mode_b:
+            return None
 
         stats = trade_stats or TradeStats()
         projected_total = stats.total_trades + 1

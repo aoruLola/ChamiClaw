@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS orders (
   limit_price DOUBLE PRECISION,
   size_usd DOUBLE PRECISION NOT NULL,
   status TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  dry_run BOOLEAN NOT NULL DEFAULT TRUE,
   adapter TEXT NOT NULL,
   raw_json JSONB
 );
@@ -86,6 +88,18 @@ CREATE TABLE IF NOT EXISTS positions_snapshots (
   positions_json JSONB NOT NULL,
   daily_pnl DOUBLE PRECISION NOT NULL,
   consecutive_losses INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS execution_compensations (
+  idempotency_key TEXT PRIMARY KEY,
+  payload JSONB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS phase_gate_states (
+  ts TIMESTAMPTZ NOT NULL,
+  phase TEXT NOT NULL,
+  allowed_mode_b BOOLEAN NOT NULL,
+  reasons_json JSONB NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS trade_logs (

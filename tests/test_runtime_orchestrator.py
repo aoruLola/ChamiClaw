@@ -3,15 +3,54 @@ from datetime import datetime, timedelta, timezone
 import asyncio
 
 from chamiclaw.adapters.simmer import SimmerAdapter
-from chamiclaw.core.models import InfoSignal, MarketCard, Mode, PriceSignal, SpreadStatus
+from chamiclaw.adapters.base import ExecutionAdapter
+from chamiclaw.clients.clob import CLOBClient
+from chamiclaw.core.models import (
+    Action,
+    InfoSignal,
+    MarketCard,
+    Mode,
+    ModeState,
+    NormalizedMarketTick,
+    OrderIntent,
+    OrderStatus,
+    OrderRecord,
+    OrderMode,
+    OrderType,
+    Position,
+    PositionSnapshot,
+    BalanceSnapshot,
+    PriceSnapshot,
+    PriceSignal,
+    Side,
+    SpreadStatus,
+)
 from chamiclaw.engines.execution import ExecutionEngine
 from chamiclaw.engines.info import InfoEngine
 from chamiclaw.engines.market import MarketService
 from chamiclaw.engines.mode import ModeEngine
+from chamiclaw.engines.price import PriceEngine
 from chamiclaw.engines.risk import RiskEngine
 from chamiclaw.engines.strategy import StrategyEngine
 from chamiclaw.orchestration.runtime import RuntimeOrchestrator
 from chamiclaw.storage.repository import InMemoryRepository
+
+
+class ReconcileAdapter(ExecutionAdapter):
+    async def place_order(self, intent, *, dry_run: bool):
+        raise NotImplementedError
+
+    async def cancel_order(self, order_id: str):
+        raise NotImplementedError
+
+    async def fetch_order(self, order_id: str) -> OrderStatus:
+        return OrderStatus(order_id=order_id, status="unknown")
+
+    async def fetch_positions(self) -> list[PositionSnapshot]:
+        return [PositionSnapshot(market_id="m1", side=Side.YES, size=10.0, avg_price=0.52, u_pnl=1.2)]
+
+    async def fetch_balances(self) -> BalanceSnapshot:
+        return BalanceSnapshot(cash=9500.0, equity=10020.0)
 
 
 def test_runtime_tick_pipeline_updates_mode_and_executes():
@@ -57,3 +96,499 @@ def test_runtime_tick_pipeline_updates_mode_and_executes():
     executed = asyncio.run(orchestrator.strategy_loop())
     assert executed == 1
     assert repo.trade_stats.total_trades == 1
+    assert len(repo.order_records) == 1
+    assert len(repo.fill_records) == 1
+    assert len(repo.portfolio.positions) == 1
+    assert len(repo.positions_snapshots) == 1
+    assert len(repo.trade_logs) == 1
+    assert "slippage" in repo.trade_logs[0]
+
+
+def test_runtime_blocks_mode_b_when_phase_gate_not_open():
+    repo = InMemoryRepository()
+    repo.phase_gate_state.allowed_mode_b = False
+    repo.upsert_market(
+        MarketCard(
+            market_id="m2",
+            question="Q2",
+            end_time=datetime.now(timezone.utc) + timedelta(days=1),
+            status="active",
+            rule_clarity_score=0.9,
+        )
+    )
+    repo.put_mode_state(ModeState(market_id="m2", mode=Mode.MODE_B_ALLOWED))
+    repo.put_price_signal(
+        PriceSignal(
+            market_id="m2",
+            change_15m=0.04,
+            vol_ratio_15m=2.2,
+            breakout_15m=True,
+            mid=0.5,
+            spread=0.01,
+        )
+    )
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+    )
+    executed = asyncio.run(orchestrator.strategy_loop())
+    assert executed == 0
+
+
+def test_runtime_strategy_loop_closes_existing_position_and_realizes_pnl():
+    repo = InMemoryRepository()
+    repo.portfolio.positions = [Position(market_id="m1", side=Side.YES, size=100.0, avg_price=0.50, u_pnl=0.0)]
+    repo.portfolio.cash = 9_950.0
+    repo.portfolio.equity = 10_000.0
+    repo.put_mode_state(ModeState(market_id="m1", mode=Mode.MODE_A))
+    repo.put_price_signal(
+        PriceSignal(
+            market_id="m1",
+            change_5m=0.02,
+            vol_ratio_15m=1.3,
+            spread=0.01,
+            mid=0.52,
+            spread_status=SpreadStatus.stable,
+        )
+    )
+
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        price_engine=PriceEngine(),
+        clob_client=CLOBClient(rest_url="https://rest", ws_url="wss://ws"),
+    )
+
+    executed = asyncio.run(orchestrator.strategy_loop())
+
+    assert executed == 1
+    assert len(repo.order_records) == 1
+    assert repo.order_records[0].action == Action.CLOSE
+    assert len(repo.fill_records) == 1
+    assert repo.portfolio.positions == []
+    assert repo.portfolio.realized_pnl > 0
+
+
+def test_runtime_reconcile_execution_state_updates_portfolio_and_snapshots():
+    repo = InMemoryRepository()
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=ReconcileAdapter()),
+        price_engine=PriceEngine(),
+        clob_client=CLOBClient(rest_url="https://rest", ws_url="wss://ws"),
+    )
+
+    updated = asyncio.run(orchestrator.reconcile_execution_state())
+
+    assert updated.equity == 10020.0
+    assert updated.cash == 9500.0
+    assert len(updated.positions) == 1
+    assert len(repo.positions_snapshots) == 1
+
+
+def test_runtime_reconcile_order_statuses_updates_order_and_backfills_fill():
+    repo = InMemoryRepository()
+    repo.order_records.append(
+        OrderRecord(
+            order_id="o-live",
+            market_id="m1",
+            side=Side.YES,
+            action=Action.OPEN,
+            order_type=OrderType.LIMIT,
+            limit_price=0.50,
+            size_usd=100.0,
+            status="submitted",
+            adapter="SimmerAdapter",
+            mode=OrderMode.A,
+            dry_run=False,
+        )
+    )
+    repo.portfolio.cash = 10_000.0
+    repo.portfolio.equity = 10_000.0
+    repo.put_price_snapshot(
+        PriceSnapshot(
+            market_id="m1",
+            best_bid=0.49,
+            best_ask=0.51,
+            mid=0.50,
+            spread=0.02,
+            last=0.50,
+            volume_1m=0.0,
+            trades_1m=0,
+        )
+    )
+
+    class StatusAdapter(ReconcileAdapter):
+        async def fetch_order(self, order_id: str) -> OrderStatus:
+            return OrderStatus(
+                order_id=order_id,
+                status="filled",
+                raw={"fill_price": 0.50, "fill_size": 200.0, "fee": 1.5},
+            )
+
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=StatusAdapter()),
+        price_engine=PriceEngine(),
+        clob_client=CLOBClient(rest_url="https://rest", ws_url="wss://ws"),
+    )
+
+    reconciled = asyncio.run(orchestrator.reconcile_order_statuses(limit=10))
+
+    assert reconciled == 1
+    assert repo.order_records[0].status == "filled"
+    assert len(repo.fill_records) == 1
+    assert repo.fill_records[0].order_id == "o-live"
+
+
+def test_runtime_handle_market_tick_persists_snapshot_and_signal():
+    repo = InMemoryRepository()
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        price_engine=PriceEngine(),
+        clob_client=CLOBClient(rest_url="https://rest", ws_url="wss://ws"),
+    )
+
+    tick = NormalizedMarketTick(
+        market_id="m1",
+        best_bid=0.49,
+        best_ask=0.51,
+        last=0.5,
+        volume_1m=12.0,
+        trades_1m=3,
+    )
+
+    signal = orchestrator.handle_market_tick(tick)
+
+    assert repo.price_snapshots["m1"].best_bid == 0.49
+    assert repo.price_signals["m1"].market_id == "m1"
+    assert signal.market_id == "m1"
+
+
+def test_runtime_anomaly_triggers_info_refresh_with_debounce():
+    repo = InMemoryRepository()
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        price_engine=PriceEngine(),
+        clob_client=CLOBClient(rest_url="https://rest", ws_url="wss://ws"),
+    )
+    calls = {"count": 0}
+
+    def fake_info_refresh(*, anomaly_only: bool = False) -> int:
+        if anomaly_only:
+            calls["count"] += 1
+        return 0
+
+    orchestrator.info_refresh = fake_info_refresh  # type: ignore[assignment]
+    tick = NormalizedMarketTick(
+        market_id="m1",
+        best_bid=0.40,
+        best_ask=0.80,
+        last=0.60,
+        volume_1m=10.0,
+        trades_1m=2,
+    )
+
+    orchestrator.handle_market_tick(tick)
+    orchestrator.handle_market_tick(tick)
+    assert calls["count"] == 1
+
+
+def test_runtime_price_stream_consumes_ws_messages_and_persists():
+    repo = InMemoryRepository()
+    client = CLOBClient(rest_url="https://rest", ws_url="wss://ws")
+
+    async def fake_stream(_market_ids, **_kwargs):
+        yield {"type": "book", "market_id": "m1", "best_bid": 0.48, "best_ask": 0.52, "last": 0.5, "volume_1m": 1.0, "trades_1m": 1}
+        yield {"type": "book", "market_id": "m1", "best_bid": 0.49, "best_ask": 0.51, "last": 0.5, "volume_1m": 2.0, "trades_1m": 2}
+        yield {"type": "book", "market_id": "m1", "best_bid": 0.50, "best_ask": 0.52, "last": 0.51, "volume_1m": 3.0, "trades_1m": 3}
+
+    client.stream_orderbook = fake_stream  # type: ignore[assignment]
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        price_engine=PriceEngine(),
+        clob_client=client,
+        ws_backoff_base_seconds=0.01,
+    )
+
+    async def run_and_stop():
+        task = asyncio.create_task(orchestrator.run_price_stream(["m1"]))
+        while len(repo.price_signal_events) < 3:
+            await asyncio.sleep(0.01)
+        orchestrator.request_price_stream_stop()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run_and_stop())
+
+    assert len(repo.price_signal_events) == 3
+    assert len(repo.price_snapshots) == 1
+
+
+def test_runtime_price_stream_reconnect_triggers_rest_backfill():
+    repo = InMemoryRepository()
+    client = CLOBClient(rest_url="https://rest", ws_url="wss://ws")
+    calls = {"backfill": 0}
+
+    async def fake_fetch_top_of_book(_market_id: str):
+        calls["backfill"] += 1
+        return {"best_bid": 0.47, "best_ask": 0.53, "last": 0.5}
+
+    async def fake_stream(_market_ids, **_kwargs):
+        client.reconnect_count = 1
+        yield {
+            "type": "book",
+            "market_id": "m1",
+            "best_bid": 0.48,
+            "best_ask": 0.52,
+            "last": 0.5,
+            "volume_1m": 1.0,
+            "trades_1m": 1,
+        }
+
+    client.fetch_top_of_book = fake_fetch_top_of_book  # type: ignore[assignment]
+    client.stream_orderbook = fake_stream  # type: ignore[assignment]
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        price_engine=PriceEngine(),
+        clob_client=client,
+        ws_backoff_base_seconds=0.01,
+    )
+
+    async def run_and_stop():
+        task = asyncio.create_task(orchestrator.run_price_stream(["m1"]))
+        while len(repo.price_signal_events) < 1:
+            await asyncio.sleep(0.01)
+        orchestrator.request_price_stream_stop()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run_and_stop())
+    assert calls["backfill"] >= 1
+
+
+def test_runtime_price_stream_flushes_by_window():
+    repo = InMemoryRepository()
+    client = CLOBClient(rest_url="https://rest", ws_url="wss://ws")
+
+    async def fake_stream(_market_ids, **_kwargs):
+        yield {
+            "type": "book",
+            "market_id": "m1",
+            "best_bid": 0.48,
+            "best_ask": 0.52,
+            "last": 0.5,
+            "volume_1m": 1.0,
+            "trades_1m": 1,
+            "ts": "2026-01-01T00:00:00+00:00",
+        }
+        yield {
+            "type": "book",
+            "market_id": "m1",
+            "best_bid": 0.49,
+            "best_ask": 0.51,
+            "last": 0.5,
+            "volume_1m": 2.0,
+            "trades_1m": 2,
+            "ts": "2026-01-01T00:00:10+00:00",
+        }
+        yield {
+            "type": "book",
+            "market_id": "m1",
+            "best_bid": 0.50,
+            "best_ask": 0.52,
+            "last": 0.51,
+            "volume_1m": 3.0,
+            "trades_1m": 3,
+            "ts": "2026-01-01T00:00:20+00:00",
+        }
+
+    client.stream_orderbook = fake_stream  # type: ignore[assignment]
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        price_engine=PriceEngine(),
+        clob_client=client,
+        ws_backoff_base_seconds=0.01,
+        price_flush_seconds=30,
+    )
+
+    async def run_and_stop():
+        task = asyncio.create_task(orchestrator.run_price_stream(["m1"]))
+        while len(repo.price_signal_events) < 1:
+            await asyncio.sleep(0.01)
+        orchestrator.request_price_stream_stop()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run_and_stop())
+    assert len(repo.price_signal_events) == 1
+    assert repo.price_snapshots["m1"].best_bid == 0.50
+
+
+def test_runtime_bootstrap_market_pool_fetches_and_upserts():
+    repo = InMemoryRepository()
+    card = MarketCard(
+        market_id="gm1",
+        question="Will X happen?",
+        end_time=datetime.now(timezone.utc) + timedelta(days=1),
+        status="active",
+        liquidity_score=0.7,
+        spread_stability=0.7,
+        volume_density=0.7,
+        rule_clarity_score=0.8,
+    )
+
+    class FakeMarketService(MarketService):
+        async def refresh_pool(self, top_n: int = 10):
+            assert top_n == 5
+            return [card]
+
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=FakeMarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        price_engine=PriceEngine(),
+        clob_client=CLOBClient(rest_url="https://rest", ws_url="wss://ws"),
+    )
+
+    async def run_bootstrap():
+        return await orchestrator.bootstrap_market_pool(top_n=5)
+
+    subscriptions = asyncio.run(run_bootstrap())
+    assert subscriptions == ["gm1"]
+    assert "gm1" in repo.markets
+
+
+def test_runtime_strategy_loop_respects_rate_limit_per_market_per_minute():
+    fixed_now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def now_fn() -> datetime:
+        return fixed_now
+
+    repo = InMemoryRepository()
+    repo.upsert_market(
+        MarketCard(
+            market_id="m1",
+            question="Q",
+            end_time=datetime.now(timezone.utc) + timedelta(days=1),
+            status="active",
+            rule_clarity_score=0.9,
+            liquidity_score=0.8,
+            spread_stability=0.6,
+            volume_density=0.7,
+        )
+    )
+    repo.put_mode_state(ModeState(market_id="m1", mode=Mode.MODE_A))
+    repo.put_price_signal(
+        PriceSignal(
+            market_id="m1",
+            change_5m=0.02,
+            vol_ratio_15m=1.3,
+            spread=0.01,
+            mid=0.5,
+            spread_status=SpreadStatus.stable,
+        )
+    )
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        execution_rate_limit_per_market_per_minute=1,
+        execution_rate_limit_global_per_minute=10,
+        now_fn=now_fn,
+    )
+
+    first = asyncio.run(orchestrator.strategy_loop())
+    repo.portfolio.positions = []
+    second = asyncio.run(orchestrator.strategy_loop())
+
+    assert first == 1
+    assert second == 0
+
+
+def test_runtime_can_sync_and_restore_execution_compensations():
+    repo = InMemoryRepository()
+    failing_engine = ExecutionEngine(adapter=SimmerAdapter(), dry_run=True)
+    key_intent = OrderIntent(
+        market_id="m1",
+        side=Side.YES,
+        action=Action.OPEN,
+        order_type=OrderType.LIMIT,
+        limit_price=0.5,
+        size_usd=10.0,
+        mode=OrderMode.A,
+        thesis="seed",
+        idempotency_key="intent-seed",
+    )
+    # seed via repo path, then restore into engine
+    repo.upsert_execution_compensation("intent-seed", key_intent)
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=failing_engine,
+    )
+
+    restored = orchestrator.restore_execution_compensations()
+    synced = orchestrator.sync_execution_compensations()
+
+    assert restored == 1
+    assert synced["pending"] == 1

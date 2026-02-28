@@ -29,6 +29,18 @@ uvicorn chamiclaw.api.app:app --reload
 - `SQLITE_PATH=data/chamiclaw_t1.db`
 - `SCHEDULER_ENABLED=true|false`（默认 `false`）
 - `LOG_LEVEL=INFO|DEBUG|...`（默认 `INFO`）
+- `GAMMA_BASE_URL=https://gamma-api.polymarket.com`
+- `CLOB_WS_URL=wss://clob.polymarket.com/ws`
+- `CLOB_REST_URL=https://clob.polymarket.com`
+- `BRAVE_API_KEY=...`（可选，空值时退化为占位打分）
+- `SIMMER_BASE_URL=...`（`EXECUTION_DRY_RUN=false` 时必填）
+- `SIMMER_API_KEY=...`（`EXECUTION_DRY_RUN=false` 时必填）
+- `EXECUTION_DRY_RUN=true|false`（默认 `true`）
+- `PHASE_GATE_ENABLED=true|false`（默认 `true`）
+- `PHASE1_MIN_TRADES=200`
+- `PHASE1_MIN_WIN_RATE=0.57`
+- `PHASE1_MIN_RR=1.1`
+- `PHASE1_MAX_DRAWDOWN=0.05`
 
 ## API（当前最小实现）
 
@@ -40,6 +52,11 @@ uvicorn chamiclaw.api.app:app --reload
 - `POST /ops/trade-stats/reset`（重置交易计数）
 - `POST /ops/portfolio/apply-pnl`（注入已实现PnL并更新组合状态）
 - `POST /ops/state/reset`（清空运行态缓存信号，可选清空市场池/交易统计/风控控制位）
+- `GET /ops/phase`（查看阶段门槛状态）
+- `POST /ops/phase/evaluate`（执行阶段门槛评估，可选 admin_override）
+- `POST /ops/dry-run/set`（切换执行层 dry-run）
+- `POST /ops/replay/run`（按时间窗返回可回放摘要）
+- `GET /ops/metrics/summary`（胜率/盈亏比/回撤等汇总）
 - `POST /markets/rank`
 - `POST /price/ingest`
 - `POST /info/analyze`
