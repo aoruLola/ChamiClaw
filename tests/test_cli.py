@@ -99,3 +99,65 @@ def test_cli_backtest_supports_params_file(tmp_path, capsys, monkeypatch):
     assert exit_code == 0
     assert "score" in captured.out
     assert calls["request_version_id"] == "pv-file"
+
+
+def test_cli_params_set_supports_params_version_envelope(tmp_path, monkeypatch):
+    params_file = tmp_path / "strategy_params.json"
+    params_file.write_text(
+        json.dumps({"version_id": "pv-123", "params": {"a_risk_pct": 0.009, "b_risk_pct": 0.02}}),
+        encoding="utf-8",
+    )
+    captured = {"a_risk_pct": None, "b_risk_pct": None}
+
+    def fake_call_sync(name, *args, **kwargs):  # noqa: ANN001,ANN002,ANN003
+        if name == "set_strategy_params":
+            req = args[0]
+            captured["a_risk_pct"] = req.params.a_risk_pct
+            captured["b_risk_pct"] = req.params.b_risk_pct
+            return {"ok": True}
+        return {"ok": True}
+
+    monkeypatch.setattr(cli, "_call_sync", fake_call_sync)
+
+    exit_code = cli.main(["params", "set", "--file", str(params_file)])
+
+    assert exit_code == 0
+    assert captured["a_risk_pct"] == 0.009
+    assert captured["b_risk_pct"] == 0.02
+
+
+def test_cli_backtest_supports_params_version_envelope_file(tmp_path, capsys, monkeypatch):
+    params_file = tmp_path / "params.json"
+    params_file.write_text(
+        json.dumps({"version_id": "pv-123", "params": {"a_risk_pct": 0.006, "b_risk_pct": 0.011}}),
+        encoding="utf-8",
+    )
+    repo_saved = {"a_risk_pct": None, "b_risk_pct": None}
+
+    class StubRepo:
+        def save_params_version(self, params, source="cli", score=None, make_current=False):  # noqa: ANN001
+            repo_saved["a_risk_pct"] = params.a_risk_pct
+            repo_saved["b_risk_pct"] = params.b_risk_pct
+            _ = (source, score, make_current)
+            return type("Obj", (), {"version_id": "pv-file"})()
+
+    monkeypatch.setattr(cli, "_load_runtime_repo", lambda: StubRepo())
+    monkeypatch.setattr(cli, "_call_sync", lambda *args, **kwargs: {"score": 0.2})
+
+    exit_code = cli.main(
+        [
+            "backtest",
+            "run",
+            "--from",
+            "2026-01-01T00:00:00+00:00",
+            "--to",
+            "2026-01-01T01:00:00+00:00",
+            "--params",
+            str(params_file),
+        ]
+    )
+    _ = capsys.readouterr()
+
+    assert exit_code == 0
+    assert repo_saved["a_risk_pct"] == 0.006
+    assert repo_saved["b_risk_pct"] == 0.011

@@ -56,6 +56,14 @@ def _json_dump(payload: object) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
 
+def _load_strategy_params_payload(payload: object) -> StrategyParams:
+    if isinstance(payload, dict):
+        nested = payload.get("params")
+        if isinstance(nested, dict):
+            return StrategyParams.model_validate(nested)
+    return StrategyParams.model_validate(payload)
+
+
 def _cmd_preflight(_args: argparse.Namespace) -> int:
     _json_dump(_call_sync("ops_preflight"))
     return 0
@@ -76,7 +84,7 @@ def _cmd_params_show(_args: argparse.Namespace) -> int:
 
 def _cmd_params_set(args: argparse.Namespace) -> int:
     payload = json.loads(Path(args.file).read_text(encoding="utf-8"))
-    params = StrategyParams.model_validate(payload)
+    params = _load_strategy_params_payload(payload)
     req = StrategyParamsSetRequest(params=params, source="cli")
     _json_dump(_call_sync("set_strategy_params", req, False))
     return 0
@@ -88,7 +96,7 @@ def _cmd_backtest_run(args: argparse.Namespace) -> int:
         candidate = Path(args.params)
         if candidate.exists() and candidate.is_file():
             raw = json.loads(candidate.read_text(encoding="utf-8"))
-            params = StrategyParams.model_validate(raw)
+            params = _load_strategy_params_payload(raw)
             version = _load_runtime_repo().save_params_version(
                 params,
                 source="cli_backtest_file",
