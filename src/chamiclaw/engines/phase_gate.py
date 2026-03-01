@@ -17,10 +17,18 @@ class PhaseGateService:
         self.max_drawdown = max_drawdown
 
     @staticmethod
+    def sample_trades(stats: TradeStats) -> int:
+        realized = stats.wins + stats.losses
+        if realized > 0:
+            return realized
+        return stats.total_trades
+
+    @staticmethod
     def win_rate(stats: TradeStats) -> float:
-        if stats.total_trades <= 0:
+        samples = PhaseGateService.sample_trades(stats)
+        if samples <= 0:
             return 0.0
-        return stats.wins / stats.total_trades
+        return stats.wins / samples
 
     @staticmethod
     def rr(stats: TradeStats) -> float:
@@ -44,7 +52,7 @@ class PhaseGateService:
             )
 
         reasons: list[str] = []
-        if stats.total_trades < self.min_trades:
+        if self.sample_trades(stats) < self.min_trades:
             reasons.append("min_trades_not_met")
         if self.win_rate(stats) < self.min_win_rate:
             reasons.append("min_win_rate_not_met")

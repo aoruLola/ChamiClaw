@@ -6,7 +6,20 @@ from fastapi.testclient import TestClient
 
 from chamiclaw.api import app as app_module
 from chamiclaw.api.app import app
-from chamiclaw.core.models import NormalizedMarketTick
+from chamiclaw.core.models import (
+    Action,
+    Mode,
+    ModeState,
+    NormalizedMarketTick,
+    PhaseGateState,
+    PortfolioState,
+    Position,
+    PriceSignal,
+    ExecutionResult,
+    Side,
+    SpreadStatus,
+    TradeStats,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -183,3 +196,185 @@ def test_lifespan_price_stream_updates_price_state(monkeypatch):
     payload = state.json()
     assert payload["price_snapshots"] >= 1
     assert payload["price_signals"] >= 1
+
+
+def test_strategy_run_endpoint_closes_position_and_updates_stats():
+    previous_dry_run = app_module.execution_engine.dry_run
+    app_module.execution_engine.set_dry_run(True)
+    try:
+        app_module.repo.mode_states.clear()
+        app_module.repo.order_records.clear()
+        app_module.repo.fill_records.clear()
+        app_module.repo.trade_logs.clear()
+        app_module.repo.positions_snapshots.clear()
+        app_module.repo.price_signals.clear()
+        app_module.repo.trade_stats = TradeStats()
+        app_module.repo.phase_gate_state = PhaseGateState()
+        app_module.repo.put_mode_state(ModeState(market_id="m1", mode=Mode.MODE_A))
+        app_module.repo.portfolio = PortfolioState(
+            equity=10_000.0,
+            cash=9_950.0,
+            positions=[Position(market_id="m1", side=Side.YES, size=100.0, avg_price=0.50, u_pnl=0.0)],
+        )
+
+        price_signal = PriceSignal(
+            market_id="m1",
+            spread=0.01,
+            change_5m=0.02,
+            vol_ratio_15m=1.3,
+            mid=0.52,
+            spread_status=SpreadStatus.stable,
+        )
+
+        with TestClient(app) as client:
+            res = client.post(
+                "/strategy/run",
+                params={"mode_market_id": "m1"},
+                json={
+                    "price_signal": price_signal.model_dump(mode="json"),
+                    "portfolio": app_module.repo.portfolio.model_dump(mode="json"),
+                },
+            )
+        assert res.status_code == 200
+        payload = res.json()
+        assert payload["approved"] is True
+        assert payload["execution"]["accepted"] is True
+        assert len(app_module.repo.order_records) == 1
+        assert len(app_module.repo.fill_records) == 1
+        assert len(app_module.repo.trade_logs) == 1
+        assert "m1" in app_module.repo.price_signals
+        assert app_module.repo.price_signals["m1"].mid == 0.52
+        assert app_module.repo.trade_stats.total_trades == 1
+        assert app_module.repo.trade_stats.wins == 1
+        assert app_module.repo.portfolio.positions == []
+    finally:
+        app_module.execution_engine.set_dry_run(previous_dry_run)
+
+
+def test_strategy_run_uses_repo_portfolio_as_source_of_truth():
+    previous_dry_run = app_module.execution_engine.dry_run
+    app_module.execution_engine.set_dry_run(True)
+    try:
+        app_module.repo.mode_states.clear()
+        app_module.repo.order_records.clear()
+        app_module.repo.fill_records.clear()
+        app_module.repo.trade_logs.clear()
+        app_module.repo.positions_snapshots.clear()
+        app_module.repo.trade_stats = TradeStats()
+        app_module.repo.phase_gate_state = PhaseGateState()
+        app_module.repo.put_mode_state(ModeState(market_id="m1", mode=Mode.MODE_A))
+        app_module.repo.portfolio = PortfolioState(
+            equity=10_000.0,
+            cash=9_950.0,
+            positions=[Position(market_id="m1", side=Side.YES, size=100.0, avg_price=0.50, u_pnl=0.0)],
+        )
+
+        price_signal = PriceSignal(
+            market_id="m1",
+            spread=0.01,
+            change_5m=0.02,
+            vol_ratio_15m=1.3,
+            mid=0.52,
+            spread_status=SpreadStatus.stable,
+        )
+        request_portfolio = PortfolioState(equity=10_000.0, cash=10_000.0, positions=[])
+
+        with TestClient(app) as client:
+            res = client.post(
+                "/strategy/run",
+                params={"mode_market_id": "m1"},
+                json={
+                    "price_signal": price_signal.model_dump(mode="json"),
+                    "portfolio": request_portfolio.model_dump(mode="json"),
+                },
+            )
+        assert res.status_code == 200
+        assert len(app_module.repo.order_records) == 1
+        assert app_module.repo.order_records[0].action == Action.CLOSE
+    finally:
+        app_module.execution_engine.set_dry_run(previous_dry_run)
+
+
+def test_strategy_run_syncs_execution_compensations_on_failure(monkeypatch):
+    app_module.repo.mode_states.clear()
+    app_module.repo.put_mode_state(ModeState(market_id="m1", mode=Mode.MODE_A))
+    app_module.repo.portfolio = PortfolioState(equity=10_000.0, cash=10_000.0, positions=[])
+    price_signal = PriceSignal(
+        market_id="m1",
+        spread=0.01,
+        change_5m=0.02,
+        vol_ratio_15m=1.3,
+        mid=0.5,
+        spread_status=SpreadStatus.stable,
+    )
+    sync_calls = {"count": 0}
+
+    async def fake_execute(_approved):
+        return ExecutionResult(accepted=False, status="execution_error", dry_run=True)
+
+    def fake_sync():
+        sync_calls["count"] += 1
+        return {"pending": 1, "stored": 1}
+
+    monkeypatch.setattr(app_module.execution_engine, "execute", fake_execute)
+    monkeypatch.setattr(app_module.orchestrator, "sync_execution_compensations", fake_sync)
+
+    with TestClient(app) as client:
+        res = client.post(
+            "/strategy/run",
+            params={"mode_market_id": "m1"},
+            json={
+                "price_signal": price_signal.model_dump(mode="json"),
+                "portfolio": app_module.repo.portfolio.model_dump(mode="json"),
+            },
+        )
+    assert res.status_code == 200
+    assert sync_calls["count"] == 1
+
+
+def test_strategy_run_respects_repo_risk_controls_when_repo_has_no_position():
+    previous_dry_run = app_module.execution_engine.dry_run
+    app_module.execution_engine.set_dry_run(True)
+    try:
+        app_module.repo.mode_states.clear()
+        app_module.repo.order_records.clear()
+        app_module.repo.fill_records.clear()
+        app_module.repo.trade_logs.clear()
+        app_module.repo.positions_snapshots.clear()
+        app_module.repo.trade_stats = TradeStats()
+        app_module.repo.phase_gate_state = PhaseGateState()
+        app_module.repo.put_mode_state(ModeState(market_id="m1", mode=Mode.MODE_A))
+        app_module.repo.portfolio = PortfolioState(
+            equity=10_000.0,
+            cash=10_000.0,
+            positions=[],
+            daily_halt=True,
+        )
+
+        price_signal = PriceSignal(
+            market_id="m1",
+            spread=0.01,
+            change_5m=0.02,
+            vol_ratio_15m=1.3,
+            mid=0.5,
+            spread_status=SpreadStatus.stable,
+        )
+        request_portfolio = PortfolioState(equity=10_000.0, cash=10_000.0, positions=[], daily_halt=False)
+
+        with TestClient(app) as client:
+            res = client.post(
+                "/strategy/run",
+                params={"mode_market_id": "m1"},
+                json={
+                    "price_signal": price_signal.model_dump(mode="json"),
+                    "portfolio": request_portfolio.model_dump(mode="json"),
+                },
+            )
+
+        assert res.status_code == 200
+        payload = res.json()
+        assert payload["approved"] is False
+        assert payload["reason"] == "daily_drawdown_halt"
+        assert len(app_module.repo.order_records) == 0
+    finally:
+        app_module.execution_engine.set_dry_run(previous_dry_run)

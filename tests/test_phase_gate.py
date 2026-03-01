@@ -37,3 +37,19 @@ def test_phase_gate_respects_manual_override():
     assert state.phase == Phase.PHASE_2
     assert state.allowed_mode_b is True
     assert "admin_override" in state.reasons
+
+
+def test_phase_gate_uses_realized_trade_count_for_min_trades():
+    gate = PhaseGateService(min_trades=200, min_win_rate=0.57, min_rr=1.1, max_drawdown=0.05)
+    stats = TradeStats(
+        total_trades=500,
+        wins=114,
+        losses=86,
+        gross_profit=250.0,
+        gross_loss=190.0,
+    )
+
+    state = gate.evaluate(stats, max_drawdown_pct=0.03)
+
+    assert state.phase == Phase.PHASE_2
+    assert state.allowed_mode_b is True

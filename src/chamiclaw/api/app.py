@@ -1,15 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import shutil
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, HTTPException
 
 from chamiclaw.adapters.simmer import SimmerAdapter
 from chamiclaw.clients.brave import BraveClient
 from chamiclaw.clients.clob import CLOBClient
 from chamiclaw.clients.gamma import GammaClient
-from chamiclaw.core.models import InfoSignal, MarketCard, OrderRecord, PortfolioState, PriceSignal
+from chamiclaw.core.models import (
+    BacktestRequest,
+    InfoSignal,
+    MarketCard,
+    PortfolioState,
+    PreflightCheck,
+    PreflightReport,
+    PriceSignal,
+    StrategyParamsSetRequest,
+)
 from chamiclaw.core.settings import AppSettings
 from chamiclaw.engines.execution import ExecutionEngine
 from chamiclaw.engines.info import InfoEngine
@@ -21,6 +35,8 @@ from chamiclaw.engines.price import PriceEngine
 from chamiclaw.engines.risk import RiskEngine
 from chamiclaw.engines.strategy import StrategyEngine
 from chamiclaw.obs.logging import configure_logging, get_logger
+from chamiclaw.optimization.backtest import BacktestEngine
+from chamiclaw.optimization.online_tuner import OnlineTuner
 from chamiclaw.orchestration.runtime import RuntimeOrchestrator
 from chamiclaw.orchestration.scheduler import TaskScheduler
 from chamiclaw.storage.repository import build_repository
@@ -76,6 +92,50 @@ orchestrator = RuntimeOrchestrator(
     execution_rate_limit_global_per_minute=settings.execution_rate_limit_global_per_minute,
 )
 scheduler = TaskScheduler(settings)
+backtest_engine = BacktestEngine()
+online_tuner = OnlineTuner(backtest_engine=backtest_engine)
+
+
+def _persist_current_params_to_path() -> bool:
+    params_path = Path(settings.params_path)
+    try:
+        params_path.parent.mkdir(parents=True, exist_ok=True)
+        current = repo.get_current_params()
+        payload = {
+            "version_id": current.version_id,
+            "created_at": current.created_at.isoformat(),
+            "source": current.source,
+            "score": current.score,
+            "params": current.params.model_dump(mode="json"),
+        }
+        params_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except OSError as exc:
+        logger.warning("params_file_persist_failed", path=str(params_path), error=str(exc))
+        return False
+
+
+def _load_params_from_path_if_exists() -> None:
+    params_path = Path(settings.params_path)
+    if not params_path.exists() or not params_path.is_file():
+        return
+    try:
+        payload = json.loads(params_path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("params_file_invalid_json", path=str(params_path))
+        return
+    raw_params = payload.get("params", payload)
+    try:
+        params = StrategyParamsSetRequest(params=raw_params, source="params_file").params
+    except Exception:
+        logger.warning("params_file_invalid_schema", path=str(params_path))
+        return
+    repo.save_params_version(params, source="params_file", make_current=True)
+
+
+_load_params_from_path_if_exists()
+orchestrator.refresh_strategy_params()
+_persist_current_params_to_path()
 
 
 async def _strategy_job() -> int:
@@ -92,6 +152,88 @@ scheduler.bootstrap_defaults(
     strategy_loop_fn=_strategy_job,
     info_refresh_fn=orchestrator.info_refresh,
 )
+
+
+def _probe_http(url: str, timeout_seconds: float = 3.0) -> tuple[bool, str]:
+    try:
+        with httpx.Client(timeout=timeout_seconds) as client:
+            response = client.get(url)
+        if response.status_code >= 500:
+            return False, f"http_{response.status_code}"
+        return True, f"http_{response.status_code}"
+    except Exception as exc:  # pragma: no cover - network failures are environment dependent
+        return False, str(exc)
+
+
+def build_preflight_report() -> dict:
+    checks: list[PreflightCheck] = []
+    if settings.run_profile == "live" and execution_engine.dry_run:
+        checks.append(PreflightCheck(name="execution_mode", ok=True, message="live profile with dry-run safety"))
+    elif not execution_engine.dry_run and (not settings.simmer_base_url or not settings.simmer_api_key):
+        checks.append(PreflightCheck(name="execution_mode", ok=False, message="missing simmer live credentials"))
+    else:
+        checks.append(
+            PreflightCheck(
+                name="execution_mode",
+                ok=True,
+                message=f"profile={settings.run_profile}, dry_run={execution_engine.dry_run}",
+            )
+        )
+
+    if settings.repository_backend == "sqlite":
+        db_path = Path(settings.sqlite_path)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        writable = os.access(db_path.parent, os.W_OK)
+        free_bytes = shutil.disk_usage(db_path.parent).free
+        enough_space = free_bytes >= 500 * 1024 * 1024
+        checks.append(
+            PreflightCheck(
+                name="sqlite_writable",
+                ok=bool(writable and enough_space),
+                message=f"writable={writable}, free_mb={free_bytes // (1024 * 1024)}",
+            )
+        )
+    else:
+        checks.append(PreflightCheck(name="sqlite_writable", ok=True, message="repository_backend is not sqlite"))
+
+    gamma_ok, gamma_msg = _probe_http(f"{settings.gamma_base_url}/markets")
+    checks.append(PreflightCheck(name="gamma_connectivity", ok=gamma_ok, message=gamma_msg))
+    clob_ok, clob_msg = _probe_http(f"{settings.clob_rest_url}/book?market=healthcheck")
+    checks.append(PreflightCheck(name="clob_connectivity", ok=clob_ok, message=clob_msg))
+    if execution_engine.dry_run:
+        checks.append(PreflightCheck(name="simmer_connectivity", ok=True, message="skipped_in_dry_run"))
+    else:
+        simmer_ok, simmer_msg = _probe_http(f"{settings.simmer_base_url}/health")
+        checks.append(PreflightCheck(name="simmer_connectivity", ok=simmer_ok, message=simmer_msg))
+
+    risk_ok = not repo.portfolio.daily_halt and repo.portfolio.pause_until is None
+    checks.append(
+        PreflightCheck(
+            name="risk_controls",
+            ok=risk_ok,
+            message=f"daily_halt={repo.portfolio.daily_halt}, pause_until={repo.portfolio.pause_until}",
+        )
+    )
+    account_ok = repo.portfolio.equity > 0 and repo.portfolio.cash >= 0
+    checks.append(
+        PreflightCheck(
+            name="account_state",
+            ok=account_ok,
+            message=(
+                f"equity={repo.portfolio.equity:.4f},cash={repo.portfolio.cash:.4f},"
+                f"positions={len(repo.portfolio.positions)}"
+            ),
+        )
+    )
+    checks.append(
+        PreflightCheck(
+            name="phase_gate",
+            ok=repo.phase_gate_state.allowed_mode_b or repo.phase_gate_state.phase.value == "PHASE_1",
+            message=f"phase={repo.phase_gate_state.phase.value}, allowed_mode_b={repo.phase_gate_state.allowed_mode_b}",
+        )
+    )
+    ok = all(item.ok for item in checks)
+    return PreflightReport(ok=ok, checks=checks).model_dump(mode="json")
 
 
 @asynccontextmanager
@@ -170,6 +312,29 @@ async def ops_state() -> dict:
 @app.get("/ops/config")
 async def ops_config() -> dict:
     return settings.model_dump()
+
+
+@app.get("/ops/preflight")
+async def ops_preflight() -> dict:
+    payload = build_preflight_report()
+    logger.info("ops_preflight", ok=payload["ok"])
+    return payload
+
+
+@app.get("/ops/strategy/params")
+async def get_strategy_params() -> dict:
+    return repo.get_current_params().model_dump(mode="json")
+
+
+@app.post("/ops/strategy/params/set")
+async def set_strategy_params(payload: StrategyParamsSetRequest, dry_run: bool = False) -> dict:
+    if dry_run:
+        return {"saved": False, "params": payload.params.model_dump(mode="json"), "source": payload.source}
+    saved = repo.save_params_version(payload.params, source=payload.source, make_current=True)
+    orchestrator.refresh_strategy_params()
+    _persist_current_params_to_path()
+    logger.info("strategy_params_set", version_id=saved.version_id, source=payload.source)
+    return saved.model_dump(mode="json")
 
 
 @app.post("/ops/risk/reset")
@@ -306,37 +471,47 @@ async def run_strategy(mode_market_id: str, price_signal: PriceSignal, portfolio
     mode_state = repo.mode_states.get(mode_market_id)
     if mode_state is None:
         raise HTTPException(status_code=404, detail=f"mode_state not found for market_id={mode_market_id}")
+    repo.put_price_signal(price_signal)
 
+    # Repository portfolio is the runtime source of truth for risk controls and positions.
+    working_portfolio = repo.portfolio.model_copy(deep=True)
+    position_size = 0.0
+    position_avg_price = None
+    position_side = None
+    for pos in working_portfolio.positions:
+        if pos.market_id != mode_market_id:
+            continue
+        position_size = pos.size
+        position_avg_price = pos.avg_price
+        position_side = pos.side.value
+        break
+
+    orchestrator.refresh_strategy_params()
     intent = strategy_engine.generate_intent(
-        portfolio.equity,
+        working_portfolio.equity,
         mode_state,
         price_signal,
         trade_stats=repo.trade_stats,
+        position_size=position_size,
+        position_avg_price=position_avg_price,
+        position_side=position_side,
         allow_mode_b=repo.phase_gate_state.allowed_mode_b,
     )
     if intent is None:
         return {"intent": None, "approved": False, "reason": "no_signal_or_mode_limit"}
 
-    approved = risk_engine.validate(intent, portfolio)
+    approved = risk_engine.validate(intent, working_portfolio)
     result = await execution_engine.execute(approved)
     if approved.approved and approved.intent is not None and result and result.accepted:
-        repo.register_trade(approved.intent.mode.value)
-        repo.record_order(
-            OrderRecord(
-                order_id=result.order_id or "",
-                market_id=approved.intent.market_id,
-                side=approved.intent.side,
-                action=approved.intent.action,
-                order_type=approved.intent.order_type,
-                limit_price=approved.intent.limit_price,
-                size_usd=approved.intent.size_usd,
-                status=result.status,
-                adapter=execution_engine.adapter.__class__.__name__,
-                mode=approved.intent.mode,
-                dry_run=result.dry_run,
-                raw=result.raw,
-            )
+        updated_portfolio = orchestrator.apply_execution_result(
+            intent=approved.intent,
+            result=result,
+            signal=price_signal,
+            portfolio=working_portfolio,
+            risk_reason=approved.reason,
         )
+        repo.portfolio = updated_portfolio
+    orchestrator.sync_execution_compensations()
     return {
         "intent": intent,
         "approved": approved.approved,
@@ -370,6 +545,18 @@ async def set_dry_run(enabled: bool = True) -> dict:
 async def replay_run(minutes: int = 60) -> dict:
     payload = repo.replay_window(minutes)
     logger.info("replay_run", **payload)
+    return payload
+
+
+@app.post("/ops/backtest/run")
+async def backtest_run(request: BacktestRequest) -> dict:
+    payload = backtest_engine.run(repo, request).model_dump(mode="json")
+    logger.info(
+        "backtest_run",
+        params_version_id=payload["params_version_id"],
+        total_trades=payload["total_trades"],
+        score=payload["score"],
+    )
     return payload
 
 
@@ -419,4 +606,31 @@ async def execution_health() -> dict:
 async def metrics_summary() -> dict:
     payload = repo.metrics_summary()
     logger.info("metrics_summary", **payload)
+    return payload
+
+
+@app.get("/ops/optimization/leaderboard")
+async def optimization_leaderboard(limit: int = 20) -> list[dict]:
+    payload = [item.model_dump(mode="json") for item in repo.optimization_leaderboard(limit=limit)]
+    logger.info("optimization_leaderboard", items=len(payload))
+    return payload
+
+
+@app.post("/ops/optimization/online/apply")
+async def optimization_online_apply(window_minutes: int = 60, apply_best: bool = True) -> dict:
+    payload = online_tuner.run_window(
+        repo=repo,
+        window_minutes=window_minutes,
+        apply_best=apply_best,
+        execution_dry_run=execution_engine.dry_run,
+        run_profile=settings.run_profile,
+    )
+    if payload.get("applied") or payload.get("rolled_back"):
+        _persist_current_params_to_path()
+    logger.info(
+        "optimization_online_apply",
+        applied=payload["applied"],
+        rolled_back=payload["rolled_back"],
+        reason=payload["reason"],
+    )
     return payload

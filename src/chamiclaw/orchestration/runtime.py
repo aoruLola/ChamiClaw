@@ -8,14 +8,17 @@ from typing import Callable
 from chamiclaw.clients.clob import CLOBClient
 from chamiclaw.core.models import (
     Action,
+    ExecutionResult,
     FillRecord,
     Mode,
     NormalizedMarketTick,
+    OrderIntent,
     OrderRecord,
     OrderStatus,
     PortfolioState,
     Position,
     PriceSignal,
+    StrategyParams,
 )
 from chamiclaw.engines.price import PriceEngine
 from chamiclaw.engines.execution import ExecutionEngine
@@ -133,6 +136,7 @@ class RuntimeOrchestrator:
         return count
 
     async def strategy_loop(self, portfolio: PortfolioState | None = None) -> int:
+        self.refresh_strategy_params()
         pf = portfolio or self.repo.portfolio
         executed = 0
         for market_id, mode_state in self.repo.mode_states.items():
@@ -141,7 +145,7 @@ class RuntimeOrchestrator:
             price_signal = self.repo.price_signals.get(market_id)
             if price_signal is None:
                 continue
-            position_size, position_avg_price, held_minutes = self._position_context(pf, market_id)
+            position_size, position_avg_price, position_side, held_minutes = self._position_context(pf, market_id)
             intent = self.strategy_engine.generate_intent(
                 pf.equity,
                 mode_state,
@@ -149,6 +153,7 @@ class RuntimeOrchestrator:
                 trade_stats=self.repo.trade_stats,
                 position_size=position_size,
                 position_avg_price=position_avg_price,
+                position_side=position_side,
                 held_minutes=held_minutes,
                 allow_mode_b=self.repo.phase_gate_state.allowed_mode_b,
             )
@@ -160,53 +165,86 @@ class RuntimeOrchestrator:
                     continue
             result = await self.execution_engine.execute(approved)
             if approved.approved and result and result.accepted and approved.intent is not None:
-                self.repo.register_trade(approved.intent.mode.value)
-                order = OrderRecord(
-                    order_id=result.order_id or "",
-                    market_id=approved.intent.market_id,
-                    side=approved.intent.side,
-                    action=approved.intent.action,
-                    order_type=approved.intent.order_type,
-                    limit_price=approved.intent.limit_price,
-                    size_usd=approved.intent.size_usd,
-                    status=result.status,
-                    adapter=self.execution_engine.adapter.__class__.__name__,
-                    mode=approved.intent.mode,
-                    dry_run=result.dry_run,
-                    idempotency_key=approved.intent.idempotency_key,
-                    raw=result.raw,
-                )
-                self.repo.record_order(order)
-                fill = self._build_fill(order=order, signal=price_signal)
-                self.repo.record_fill(fill)
-                snapshot = self.repo.price_snapshots.get(order.market_id)
-                pf, attribution = self.portfolio_engine.apply_fill(pf, order, fill, snapshot=snapshot)
-                self._update_position_opened_at(order)
-                self.repo.record_positions_snapshot(pf)
-                save_fn = getattr(self.repo, "save_portfolio", None)
-                if callable(save_fn):
-                    save_fn()
-                self.repo.record_trade_log(
-                    {
-                        "ts": fill.ts.isoformat(),
-                        "market_id": order.market_id,
-                        "mode": order.mode.value,
-                        "action": order.action.value,
-                        "order_id": order.order_id,
-                        "fill_price": fill.fill_price,
-                        "fill_size": fill.fill_size,
-                        "fee": fill.fee,
-                        "pnl": attribution.actual_pnl,
-                        "theoretical_pnl": attribution.theoretical_pnl,
-                        "slippage": attribution.slippage,
-                        "spread_entry": attribution.spread_at_entry,
-                        "spread_exit": attribution.spread_at_exit,
-                        "reason_json": {"thesis": approved.intent.thesis, "risk_reason": approved.reason},
-                    }
+                pf = self.apply_execution_result(
+                    intent=approved.intent,
+                    result=result,
+                    signal=price_signal,
+                    portfolio=pf,
+                    risk_reason=approved.reason,
+                    evaluate_phase_gate=False,
                 )
                 executed += 1
+        if executed > 0:
+            self.evaluate_phase_gate(admin_override=False)
         self.sync_execution_compensations()
         return executed
+
+    def refresh_strategy_params(self) -> StrategyParams:
+        current = self.repo.get_current_params()
+        self.strategy_engine.configure(current.params)
+        return current.params
+
+    def apply_execution_result(
+        self,
+        *,
+        intent: OrderIntent,
+        result: ExecutionResult,
+        signal: PriceSignal,
+        portfolio: PortfolioState,
+        risk_reason: str = "approved",
+        evaluate_phase_gate: bool = True,
+    ) -> PortfolioState:
+        order = OrderRecord(
+            order_id=result.order_id or "",
+            market_id=intent.market_id,
+            side=intent.side,
+            action=intent.action,
+            order_type=intent.order_type,
+            limit_price=intent.limit_price,
+            size_usd=intent.size_usd,
+            status=result.status,
+            adapter=self.execution_engine.adapter.__class__.__name__,
+            mode=intent.mode,
+            dry_run=result.dry_run,
+            idempotency_key=intent.idempotency_key,
+            raw=result.raw,
+        )
+        self.repo.record_order(order)
+        fill = self._build_fill(order=order, signal=signal)
+        self.repo.record_fill(fill)
+        snapshot = self.repo.price_snapshots.get(order.market_id)
+        updated_portfolio, attribution = self.portfolio_engine.apply_fill(portfolio, order, fill, snapshot=snapshot)
+        self.repo.portfolio = updated_portfolio
+        self._update_position_opened_at(order)
+        self.repo.record_positions_snapshot(updated_portfolio)
+        save_fn = getattr(self.repo, "save_portfolio", None)
+        if callable(save_fn):
+            save_fn()
+        realized_pnl_for_stats: float | None = None
+        if order.action == Action.CLOSE and abs(attribution.actual_pnl) > 1e-9:
+            realized_pnl_for_stats = attribution.actual_pnl
+        self.repo.register_trade(order.mode.value, realized_pnl=realized_pnl_for_stats)
+        if evaluate_phase_gate:
+            self.evaluate_phase_gate(admin_override=False)
+        self.repo.record_trade_log(
+            {
+                "ts": fill.ts.isoformat(),
+                "market_id": order.market_id,
+                "mode": order.mode.value,
+                "action": order.action.value,
+                "order_id": order.order_id,
+                "fill_price": fill.fill_price,
+                "fill_size": fill.fill_size,
+                "fee": fill.fee,
+                "pnl": attribution.actual_pnl,
+                "theoretical_pnl": attribution.theoretical_pnl,
+                "slippage": attribution.slippage,
+                "spread_entry": attribution.spread_at_entry,
+                "spread_exit": attribution.spread_at_exit,
+                "reason_json": {"thesis": intent.thesis, "risk_reason": risk_reason},
+            }
+        )
+        return updated_portfolio
 
     def restore_execution_compensations(self) -> int:
         stored = getattr(self.repo, "execution_compensations", {})
@@ -488,7 +526,7 @@ class RuntimeOrchestrator:
             window_start_ts[market_id] = tick.ts
         return flushed
 
-    def _position_context(self, portfolio: PortfolioState, market_id: str) -> tuple[float, float | None, int]:
+    def _position_context(self, portfolio: PortfolioState, market_id: str) -> tuple[float, float | None, str | None, int]:
         for pos in portfolio.positions:
             if pos.market_id != market_id:
                 continue
@@ -498,8 +536,8 @@ class RuntimeOrchestrator:
                 opened_at = datetime.now(timezone.utc)
                 self._position_opened_at[key] = opened_at
             held_minutes = int(max(0.0, (datetime.now(timezone.utc) - opened_at).total_seconds() // 60))
-            return pos.size, pos.avg_price, held_minutes
-        return 0.0, None, 0
+            return pos.size, pos.avg_price, pos.side.value, held_minutes
+        return 0.0, None, None, 0
 
     def _allow_execution_rate_limit(self, market_id: str, action: Action) -> bool:
         if action == Action.CLOSE:

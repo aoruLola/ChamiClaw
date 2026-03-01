@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from pydantic import BaseModel
 
@@ -37,6 +38,9 @@ class AppSettings(BaseModel):
     phase1_min_win_rate: float = 0.57
     phase1_min_rr: float = 1.1
     phase1_max_drawdown: float = 0.05
+    run_profile: str = "sim"
+    params_path: str = "data/strategy_params.json"
+    data_retention_days: int = 30
 
     @staticmethod
     def _as_bool(value: str, default: bool = False) -> bool:
@@ -79,8 +83,16 @@ class AppSettings(BaseModel):
         if ws_stale_timeout_seconds <= 0:
             raise ValueError("WS_STALE_TIMEOUT_SECONDS must be > 0.")
 
+    @staticmethod
+    def _validate_local_runtime(*, run_profile: str, data_retention_days: int) -> None:
+        if run_profile not in {"sim", "live"}:
+            raise ValueError("RUN_PROFILE must be one of: sim, live.")
+        if data_retention_days <= 0:
+            raise ValueError("DATA_RETENTION_DAYS must be > 0.")
+
     @classmethod
     def load(cls) -> "AppSettings":
+        cls._load_dotenv()
         phase1_min_trades = int(os.getenv("PHASE1_MIN_TRADES", "200"))
         phase1_min_win_rate = float(os.getenv("PHASE1_MIN_WIN_RATE", "0.57"))
         phase1_min_rr = float(os.getenv("PHASE1_MIN_RR", "1.1"))
@@ -128,6 +140,9 @@ class AppSettings(BaseModel):
         simmer_api_key = os.getenv("SIMMER_API_KEY", "").strip()
         if not execution_dry_run and (not simmer_base_url or not simmer_api_key):
             raise ValueError("SIMMER_BASE_URL and SIMMER_API_KEY are required when EXECUTION_DRY_RUN=false.")
+        run_profile = os.getenv("RUN_PROFILE", "sim").strip().lower() or "sim"
+        data_retention_days = int(os.getenv("DATA_RETENTION_DAYS", "30"))
+        cls._validate_local_runtime(run_profile=run_profile, data_retention_days=data_retention_days)
 
         return cls(
             scheduler_enabled=os.getenv("SCHEDULER_ENABLED", "false").lower() == "true",
@@ -157,5 +172,36 @@ class AppSettings(BaseModel):
             phase1_min_win_rate=phase1_min_win_rate,
             phase1_min_rr=phase1_min_rr,
             phase1_max_drawdown=phase1_max_drawdown,
+            run_profile=run_profile,
+            params_path=os.getenv("PARAMS_PATH", "data/strategy_params.json"),
+            data_retention_days=data_retention_days,
         )
+
+    @staticmethod
+    def _load_dotenv(path: str = ".env") -> None:
+        toggle = os.getenv("CHAMICLAW_LOAD_DOTENV")
+        if toggle is None and (os.getenv("PYTEST_CURRENT_TEST") or os.getenv("PYTEST_VERSION")):
+            return
+        if toggle is not None and toggle.strip().lower() in {"0", "false", "no", "off"}:
+            return
+
+        env_path = Path(path)
+        if not env_path.exists() or not env_path.is_file():
+            return
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.lower().startswith("export "):
+                line = line[7:].strip()
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not key or key in os.environ:
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                value = value[1:-1]
+            os.environ[key] = value
 

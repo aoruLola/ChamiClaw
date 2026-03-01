@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def version_id(prefix: str = "v") -> str:
+    return f"{prefix}-{uuid4().hex[:12]}"
 
 
 class SpreadStatus(str, Enum):
@@ -163,6 +168,7 @@ class PortfolioState(BaseModel):
     consecutive_losses: int = 0
     max_drawdown_pct: float = 0.0
     per_market_drawdown_pct: dict[str, float] = Field(default_factory=dict)
+    per_market_realized_pnl: dict[str, float] = Field(default_factory=dict)
     pause_until: datetime | None = None
     daily_halt: bool = False
     phase: Phase = Phase.PHASE_1
@@ -250,3 +256,83 @@ class PhaseGateState(BaseModel):
     phase: Phase = Phase.PHASE_1
     allowed_mode_b: bool = False
     reasons: list[str] = Field(default_factory=list)
+
+
+class StrategyParams(BaseModel):
+    a_risk_pct: float = 0.004
+    b_risk_pct: float = 0.007
+    max_b_share: float = 0.2
+    a_spread_max: float = 0.015
+    a_change_5m_min_abs: float = 0.01
+    a_vol_ratio_15m_min: float = 1.2
+    a_mid_min: float = 0.25
+    a_mid_max: float = 0.75
+    a_take_profit: float = 0.01
+    a_stop_loss: float = 0.008
+    a_max_hold_minutes: int = 45
+    b_change_15m_min_abs: float = 0.03
+    b_vol_ratio_15m_min: float = 2.0
+    b_breakout_required: bool = True
+    b_mid_min: float = 0.35
+    b_mid_max: float = 0.65
+    b_take_profit: float = 0.03
+    b_stop_loss: float = 0.015
+    b_max_hold_minutes: int = 90
+
+
+class ParamsVersion(BaseModel):
+    version_id: str = Field(default_factory=lambda: version_id("pv"))
+    created_at: datetime = Field(default_factory=utc_now)
+    source: str = "system"
+    score: float | None = None
+    params: StrategyParams = Field(default_factory=StrategyParams)
+
+
+class PreflightCheck(BaseModel):
+    name: str
+    ok: bool
+    message: str = ""
+
+
+class PreflightReport(BaseModel):
+    ok: bool
+    checks: list[PreflightCheck] = Field(default_factory=list)
+
+
+class BacktestRequest(BaseModel):
+    from_ts: datetime
+    to_ts: datetime
+    params_version_id: str | None = None
+
+
+class BacktestReport(BaseModel):
+    from_ts: datetime
+    to_ts: datetime
+    params_version_id: str
+    total_trades: int
+    win_rate: float
+    rr: float
+    max_drawdown_pct: float
+    mode_a_trades: int
+    mode_b_trades: int
+    score: float
+    sampled_price_signals: int
+    sampled_mode_states: int
+    sampled_orders: int
+    sampled_fills: int
+
+
+class OptimizationTrial(BaseModel):
+    trial_id: str = Field(default_factory=lambda: version_id("trial"))
+    created_at: datetime = Field(default_factory=utc_now)
+    params_version_id: str
+    window_minutes: int
+    score: float
+    applied: bool = False
+    rolled_back: bool = False
+    details: dict[str, float] = Field(default_factory=dict)
+
+
+class StrategyParamsSetRequest(BaseModel):
+    params: StrategyParams
+    source: str = "api"

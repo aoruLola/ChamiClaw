@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import pytest
 
@@ -82,3 +83,42 @@ def test_settings_loads_ws_stream_runtime_defaults(monkeypatch):
     assert settings.clob_ws_backoff_max_seconds == 30.0
     assert settings.price_flush_seconds == 30
     assert settings.ws_stale_timeout_seconds == 90
+
+
+def test_settings_loads_values_from_dotenv_file(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CHAMICLAW_LOAD_DOTENV", "true")
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "REPOSITORY_BACKEND=sqlite",
+                "SIMMER_BASE_URL=https://api.simmer.markets",
+                "SIMMER_API_KEY=from-dotenv",
+                "BRAVE_API_KEY=from-dotenv-brave",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("REPOSITORY_BACKEND", raising=False)
+    monkeypatch.delenv("SIMMER_BASE_URL", raising=False)
+    monkeypatch.delenv("SIMMER_API_KEY", raising=False)
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+    monkeypatch.setenv("EXECUTION_DRY_RUN", "true")
+
+    settings = AppSettings.load()
+
+    assert settings.repository_backend == "sqlite"
+    assert settings.simmer_base_url == "https://api.simmer.markets"
+    assert settings.simmer_api_key == "from-dotenv"
+    assert settings.brave_api_key == "from-dotenv-brave"
+
+
+def test_settings_environment_variable_overrides_dotenv(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CHAMICLAW_LOAD_DOTENV", "true")
+    (tmp_path / ".env").write_text("REPOSITORY_BACKEND=sqlite", encoding="utf-8")
+    monkeypatch.setenv("REPOSITORY_BACKEND", "memory")
+
+    settings = AppSettings.load()
+
+    assert settings.repository_backend == "memory"

@@ -83,6 +83,11 @@ class PortfolioEngine:
                 portfolio.consecutive_losses += 1
             else:
                 portfolio.consecutive_losses = 0
+            market_realized = portfolio.per_market_realized_pnl.get(order.market_id, 0.0) + actual_pnl
+            portfolio.per_market_realized_pnl[order.market_id] = market_realized
+            current_market_dd = max(0.0, -market_realized / max(portfolio.equity, 1e-9))
+            previous_market_dd = portfolio.per_market_drawdown_pct.get(order.market_id, 0.0)
+            portfolio.per_market_drawdown_pct[order.market_id] = max(previous_market_dd, current_market_dd)
             position.size -= close_size
             if position.size <= 1e-9:
                 portfolio.positions = [
