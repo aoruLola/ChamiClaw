@@ -490,6 +490,50 @@ def test_runtime_price_stream_reconnect_triggers_rest_backfill():
     assert calls["backfill"] >= 1
 
 
+def test_runtime_price_stream_backfills_when_ws_cycle_has_no_payloads():
+    repo = InMemoryRepository()
+    client = CLOBClient(rest_url="https://rest", ws_url="wss://ws")
+    calls = {"backfill": 0, "stream_cycles": 0}
+
+    async def fake_fetch_top_of_book(_market_id: str):
+        calls["backfill"] += 1
+        return {"best_bid": 0.47, "best_ask": 0.53, "last": 0.5}
+
+    async def fake_stream(_market_ids, **_kwargs):
+        calls["stream_cycles"] += 1
+        client.reconnect_count = calls["stream_cycles"]
+        if False:
+            yield {}
+
+    client.fetch_top_of_book = fake_fetch_top_of_book  # type: ignore[assignment]
+    client.stream_orderbook = fake_stream  # type: ignore[assignment]
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        price_engine=PriceEngine(),
+        clob_client=client,
+        ws_backoff_base_seconds=0.01,
+    )
+
+    async def run_and_stop():
+        task = asyncio.create_task(orchestrator.run_price_stream(["m1"]))
+        for _ in range(100):
+            if calls["backfill"] > 0:
+                break
+            await asyncio.sleep(0.01)
+        orchestrator.request_price_stream_stop()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run_and_stop())
+    assert calls["backfill"] >= 1
+    assert "m1" in repo.price_snapshots
+
+
 def test_runtime_price_stream_flushes_by_window():
     repo = InMemoryRepository()
     client = CLOBClient(rest_url="https://rest", ws_url="wss://ws")

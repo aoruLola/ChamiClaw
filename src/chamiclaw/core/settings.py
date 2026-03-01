@@ -16,7 +16,7 @@ class AppSettings(BaseModel):
     sqlite_path: str = "data/chamiclaw_t1.db"
     log_level: str = "INFO"
     gamma_base_url: str = "https://gamma-api.polymarket.com"
-    clob_ws_url: str = "wss://clob.polymarket.com/ws"
+    clob_ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     clob_rest_url: str = "https://clob.polymarket.com"
     clob_ws_max_retries: int = 10
     clob_ws_backoff_base_seconds: float = 1.0
@@ -150,7 +150,7 @@ class AppSettings(BaseModel):
             sqlite_path=os.getenv("SQLITE_PATH", "data/chamiclaw_t1.db"),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             gamma_base_url=os.getenv("GAMMA_BASE_URL", "https://gamma-api.polymarket.com"),
-            clob_ws_url=os.getenv("CLOB_WS_URL", "wss://clob.polymarket.com/ws"),
+            clob_ws_url=os.getenv("CLOB_WS_URL", "wss://ws-subscriptions-clob.polymarket.com/ws/market"),
             clob_rest_url=os.getenv("CLOB_REST_URL", "https://clob.polymarket.com"),
             clob_ws_max_retries=clob_ws_max_retries,
             clob_ws_backoff_base_seconds=clob_ws_backoff_base_seconds,

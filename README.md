@@ -30,7 +30,7 @@ uvicorn chamiclaw.api.app:app --reload
 - `SCHEDULER_ENABLED=true|false`（默认 `false`）
 - `LOG_LEVEL=INFO|DEBUG|...`（默认 `INFO`）
 - `GAMMA_BASE_URL=https://gamma-api.polymarket.com`
-- `CLOB_WS_URL=wss://clob.polymarket.com/ws`
+- `CLOB_WS_URL=wss://ws-subscriptions-clob.polymarket.com/ws/market`
 - `CLOB_REST_URL=https://clob.polymarket.com`
 - `BRAVE_API_KEY=...`（可选，空值时退化为占位打分）
 - `SIMMER_BASE_URL=...`（`EXECUTION_DRY_RUN=false` 时必填）

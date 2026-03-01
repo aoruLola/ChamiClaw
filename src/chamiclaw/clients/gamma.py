@@ -39,6 +39,26 @@ def _parse_outcomes(raw: object) -> list[str]:
     return normalized or ["YES", "NO"]
 
 
+def _parse_clob_token_ids(raw: object) -> list[str]:
+    if isinstance(raw, list):
+        values = raw
+    elif isinstance(raw, str):
+        text = raw.strip()
+        parsed: object = text
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = text
+        if isinstance(parsed, list):
+            values = parsed
+        else:
+            values = [part.strip() for part in text.split(",") if part.strip()]
+    else:
+        values = []
+    return [str(item).strip() for item in values if str(item).strip()]
+
+
 class GammaClient:
     def __init__(self, base_url: str, timeout_seconds: float = 10.0):
         self.base_url = base_url.rstrip("/")
@@ -53,9 +73,13 @@ class GammaClient:
             payload = resp.json() if resp.content else []
         cards: list[MarketCard] = []
         for item in payload:
+            clob_token_ids = _parse_clob_token_ids(
+                item.get("clobTokenIds", item.get("clob_token_ids", item.get("clob_token_ids_list", [])))
+            )
+            market_id = clob_token_ids[0] if clob_token_ids else str(item.get("id") or item.get("market_id"))
             cards.append(
                 MarketCard(
-                    market_id=str(item.get("id") or item.get("market_id")),
+                    market_id=market_id,
                     question=str(item.get("question") or ""),
                     outcomes=_parse_outcomes(item.get("outcomes", ["YES", "NO"])),
                     end_time=_parse_end_time(item.get("end_date_iso")),

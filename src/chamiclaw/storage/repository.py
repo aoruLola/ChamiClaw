@@ -453,7 +453,7 @@ class SqliteRepository(InMemoryRepository):
         super().__init__()
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(db_path)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
         self._conn.row_factory = sqlite3.Row
         self._ensure_schema()
         self._load_state()

@@ -131,3 +131,53 @@ def test_clob_stream_reconnects_with_backoff(monkeypatch):
     events = asyncio.run(collect())
     assert events
     assert sleeps == [1.0, 2.0]
+
+
+def test_clob_stream_uses_market_channel_subscription(monkeypatch):
+    client = CLOBClient(rest_url="https://rest", ws_url="wss://ws")
+    socket = FakeSocket(
+        [json.dumps({"event_type": "book", "asset_id": "m1", "bids": [["0.49", "10"]], "asks": [["0.51", "8"]]})]
+    )
+
+    def fake_connect(_url, **_kwargs):
+        return FakeConnectCtx(socket)
+
+    monkeypatch.setattr("chamiclaw.clients.clob.websockets.connect", fake_connect)
+
+    async def collect():
+        out = []
+        async for event in client.stream_orderbook(["m1"], max_retries=1, retry_backoff=0.0):
+            out.append(event)
+            break
+        return out
+
+    events = asyncio.run(collect())
+    assert events
+    assert socket.sent
+    subscription = json.loads(socket.sent[0])
+    assert subscription["type"] == "market"
+    assert subscription["assets_ids"] == ["m1"]
+
+
+def test_clob_normalize_market_channel_book_event():
+    client = CLOBClient(rest_url="https://rest", ws_url="wss://ws")
+    payload = {
+        "event_type": "book",
+        "asset_id": "m1",
+        "bids": [["0.48", "15"]],
+        "asks": [["0.52", "11"]],
+        "price": "0.50",
+        "volume": "42.0",
+        "trades": 6,
+        "timestamp": 1735689600,
+    }
+
+    tick = client.normalize_ws_event(payload)
+
+    assert tick is not None
+    assert tick.market_id == "m1"
+    assert tick.best_bid == 0.48
+    assert tick.best_ask == 0.52
+    assert tick.last == 0.50
+    assert tick.volume_1m == 42.0
+    assert tick.trades_1m == 6

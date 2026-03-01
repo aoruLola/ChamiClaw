@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import threading
 
 from chamiclaw.core.models import (
     Action,
@@ -334,3 +335,31 @@ def test_sqlite_repository_trade_logs_restore_as_dict_payload(tmp_path):
     assert repo2.trade_logs[0]["market_id"] == "m1"
     assert float(repo2.trade_logs[0]["pnl"]) == 1.23
     repo2.close()
+
+
+def test_sqlite_repository_supports_cross_thread_write(tmp_path):
+    db = tmp_path / "threaded.db"
+    repo = SqliteRepository(str(db))
+    errors: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            repo.put_price_signal(
+                PriceSignal(
+                    market_id="m-thread",
+                    spread=0.01,
+                    mid=0.5,
+                    change_5m=0.02,
+                    vol_ratio_15m=1.5,
+                    spread_status=SpreadStatus.stable,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - red path before fix
+            errors.append(exc)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    repo.close()
+
+    assert errors == []
