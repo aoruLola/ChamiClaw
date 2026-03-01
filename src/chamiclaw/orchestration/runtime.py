@@ -422,6 +422,12 @@ class RuntimeOrchestrator:
                             dropped=dropped,
                             reconnects=self.clob_client.reconnect_count,
                         )
+                reconnects_after_cycle = self.clob_client.reconnect_count
+                if reconnects_after_cycle > last_reconnect_count:
+                    await self._rest_backfill_after_reconnect(active_market_ids)
+                    last_reconnect_count = reconnects_after_cycle
+                    self.repo.update_price_stream_state(reconnects=reconnects_after_cycle)
+                    logger.warning("price_stream_reconnected", reconnects=reconnects_after_cycle)
                 if not self._price_stream_stop.is_set():
                     processed += self._flush_pending_ticks(
                         pending_ticks=pending_ticks,

@@ -44,13 +44,14 @@ class CLOBClient:
             backoff_base_seconds = max(retry_backoff, 0.0)
             backoff_max_seconds = max(backoff_max_seconds, backoff_base_seconds)
         retries = 0
+        assets_ids = [str(item).strip() for item in market_ids if str(item).strip()]
         while True:
             try:
                 async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20) as ws:
                     subscribe_payload = {
-                        "type": "subscribe",
-                        "channels": ["book", "trades"],
-                        "markets": market_ids,
+                        "type": "market",
+                        "assets_ids": assets_ids,
+                        "custom_feature_enabled": True,
                     }
                     await ws.send(json.dumps(subscribe_payload))
                     retries = 0
@@ -73,16 +74,20 @@ class CLOBClient:
                 await asyncio.sleep(delay)
 
     def normalize_ws_event(self, payload: dict) -> NormalizedMarketTick | None:
-        message_type = str(payload.get("type", "")).lower()
-        if message_type not in {"book", "trade", "trades"}:
+        message_type = str(payload.get("event_type") or payload.get("type") or "").lower()
+        if message_type not in {"book", "trade", "trades", "price_change", "last_trade_price"}:
             return None
 
-        market_id = str(payload.get("market_id") or payload.get("market") or "").strip()
+        market_id = str(payload.get("asset_id") or payload.get("market_id") or payload.get("market") or "").strip()
         if not market_id:
             return None
 
         best_bid = self._extract_price(payload, primary_key="best_bid", levels_key="bids", side="bid")
+        if best_bid is None:
+            best_bid = self._as_float(payload.get("bid"))
         best_ask = self._extract_price(payload, primary_key="best_ask", levels_key="asks", side="ask")
+        if best_ask is None:
+            best_ask = self._as_float(payload.get("ask"))
         last = self._as_float(payload.get("last"))
         if last is None:
             last = self._as_float(payload.get("price"))
@@ -98,16 +103,20 @@ class CLOBClient:
         if best_ask < best_bid:
             best_ask = best_bid
 
-        ts = self._parse_timestamp(payload.get("ts"))
-        volume_1m = self._as_float(payload.get("volume_1m")) or 0.0
-        trades_1m = int(self._as_float(payload.get("trades_1m")) or 0)
+        ts = self._parse_timestamp(payload.get("ts") or payload.get("timestamp"))
+        volume_1m = self._as_float(payload.get("volume_1m"))
+        if volume_1m is None:
+            volume_1m = self._as_float(payload.get("volume"))
+        trades_1m = self._as_float(payload.get("trades_1m"))
+        if trades_1m is None:
+            trades_1m = self._as_float(payload.get("trades"))
         return NormalizedMarketTick(
             market_id=market_id,
             best_bid=best_bid,
             best_ask=best_ask,
             last=last,
-            volume_1m=volume_1m,
-            trades_1m=trades_1m,
+            volume_1m=volume_1m or 0.0,
+            trades_1m=int(trades_1m or 0),
             ts=ts,
         )
 
@@ -155,8 +164,16 @@ class CLOBClient:
     @staticmethod
     def _parse_timestamp(raw: object) -> datetime:
         if isinstance(raw, (int, float)):
-            return datetime.fromtimestamp(float(raw), tz=timezone.utc)
+            value = float(raw)
+            if value > 1e12:
+                value = value / 1000.0
+            return datetime.fromtimestamp(value, tz=timezone.utc)
         if isinstance(raw, str) and raw:
+            if raw.isdigit():
+                value = float(raw)
+                if value > 1e12:
+                    value = value / 1000.0
+                return datetime.fromtimestamp(value, tz=timezone.utc)
             normalized = raw.replace("Z", "+00:00")
             try:
                 parsed = datetime.fromisoformat(normalized)

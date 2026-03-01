@@ -142,15 +142,23 @@ async def _strategy_job() -> int:
     return await orchestrator.strategy_loop()
 
 
-def _price_job() -> int:
+async def _market_refresh_job() -> int:
+    return orchestrator.market_refresh()
+
+
+async def _price_job() -> int:
     return len(repo.price_signals)
 
 
+async def _info_refresh_job() -> int:
+    return orchestrator.info_refresh()
+
+
 scheduler.bootstrap_defaults(
-    market_refresh_fn=orchestrator.market_refresh,
+    market_refresh_fn=_market_refresh_job,
     price_aggregate_fn=_price_job,
     strategy_loop_fn=_strategy_job,
-    info_refresh_fn=orchestrator.info_refresh,
+    info_refresh_fn=_info_refresh_job,
 )
 
 
