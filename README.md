@@ -31,6 +31,14 @@ curl -X POST http://127.0.0.1:8000/ops/tick
 curl -X POST "http://127.0.0.1:8000/ops/emergency/stop?pause_minutes=1440&reason=manual_stop"
 ```
 
+Web UI:
+
+```bash
+open http://127.0.0.1:8000/ui/
+```
+
+The dashboard is a lightweight read-only control surface backed by the existing ops APIs. It shows service health, market pool quality, preflight checks, webhook status, and the latest weather batch summary.
+
 ## Important Environment Variables
 
 Core runtime:
@@ -103,6 +111,7 @@ Webhook delivery failures are logged and counted, but they do not stop trading o
 
 ## Useful Ops Endpoints
 
+- `GET /ui/`
 - `GET /health`
 - `GET /ops/state`
 - `GET /ops/preflight`

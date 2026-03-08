@@ -36,3 +36,8 @@ asyncio_default_fixture_loop_scope = "function"
 [tool.ruff]
 line-length = 100
 
+[tool.hatch.build]
+include = [
+  "src/chamiclaw/webui/**",
+]
+

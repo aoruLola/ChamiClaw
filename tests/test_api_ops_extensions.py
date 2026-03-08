@@ -191,6 +191,18 @@ def test_health_and_ops_state_expose_market_pool_quality_fields():
     assert state.json()["market_pool"]["weather_markets_rejected_by_reason"]["not_weather_family"] == 53
 
 
+def test_webui_routes_serve_dashboard_and_assets():
+    with TestClient(app) as client:
+        dashboard = client.get("/ui/")
+        asset = client.get("/ui/assets/app.js")
+
+    assert dashboard.status_code == 200
+    assert "text/html" in dashboard.headers["content-type"]
+    assert "ChamiClaw Control Surface" in dashboard.text
+    assert asset.status_code == 200
+    assert "javascript" in asset.headers["content-type"]
+
+
 def test_lifespan_starts_and_stops_price_stream_task(monkeypatch):
     lifecycle = {"started": False, "cancelled": False}
 

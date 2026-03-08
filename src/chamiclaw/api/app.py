@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 
 from chamiclaw.adapters.simmer import SimmerAdapter
 from chamiclaw.clients.brave import BraveClient
@@ -395,6 +396,8 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="ChamiClaw", version="0.4.0", lifespan=lifespan)
+webui_dir = Path(__file__).resolve().parents[1] / "webui"
+app.mount("/ui", StaticFiles(directory=str(webui_dir), html=True), name="webui")
 
 
 @app.get("/health")
