@@ -1,4 +1,15 @@
-from chamiclaw.core.models import Mode, ModeState, PriceSignal, SpreadStatus, TradeStats
+from datetime import date
+
+from chamiclaw.core.models import (
+    ForecastConsensus,
+    Mode,
+    ModeState,
+    PriceSignal,
+    PriceSnapshot,
+    SpreadStatus,
+    TradeStats,
+    WeatherMarketMeta,
+)
 from chamiclaw.engines.strategy import StrategyEngine
 
 
@@ -29,7 +40,6 @@ def test_strategy_blocks_mode_b_when_b_share_exceeded():
         mid=0.5,
     )
     stats = TradeStats(total_trades=4, b_trades=1)
-    # projected ratio = 2/5 = 40% > 20%
     intent = engine.generate_intent(10_000, mode_state, signal, trade_stats=stats)
     assert intent is None
 
@@ -178,3 +188,80 @@ def test_strategy_does_not_close_no_position_on_small_favorable_move():
     )
 
     assert intent is None
+
+
+def test_strategy_ranks_weather_candidates_by_edge_and_limits_batch():
+    engine = StrategyEngine()
+    markets = [
+        WeatherMarketMeta(market_id="m1", question="NYC rain?", location="New York, NY"),
+        WeatherMarketMeta(market_id="m2", question="Boston rain?", location="Boston, MA"),
+    ]
+    price_snapshots = {
+        "m1": PriceSnapshot(market_id="m1", best_bid=0.39, best_ask=0.41, mid=0.40, spread=0.02, last=0.40),
+        "m2": PriceSnapshot(market_id="m2", best_bid=0.49, best_ask=0.51, mid=0.50, spread=0.02, last=0.50),
+    }
+    consensuses = {
+        "m1": ForecastConsensus(
+            market_id="m1",
+            location="New York, NY",
+            forecast_date=date(2026, 1, 5),
+            consensus_probability=0.70,
+            confidence=0.80,
+            dispersion=0.1,
+            freshness_minutes=30,
+        ),
+        "m2": ForecastConsensus(
+            market_id="m2",
+            location="Boston, MA",
+            forecast_date=date(2026, 1, 5),
+            consensus_probability=0.62,
+            confidence=0.70,
+            dispersion=0.08,
+            freshness_minutes=25,
+        ),
+    }
+
+    ranked = engine.rank_weather_candidates(
+        markets,
+        price_snapshots=price_snapshots,
+        consensuses=consensuses,
+        portfolio_equity=10_000,
+        max_candidates=1,
+        per_market_cap_usd=50.0,
+    )
+
+    assert len(ranked) == 1
+    assert ranked[0].market_id == "m1"
+    assert ranked[0].edge == 0.30
+    assert ranked[0].suggested_size_usd == 50.0
+
+
+def test_strategy_skips_stale_or_low_confidence_weather_candidates():
+    engine = StrategyEngine()
+    markets = [WeatherMarketMeta(market_id="m1", question="NYC rain?", location="New York, NY")]
+    price_snapshots = {
+        "m1": PriceSnapshot(market_id="m1", best_bid=0.44, best_ask=0.46, mid=0.45, spread=0.02, last=0.45)
+    }
+    consensuses = {
+        "m1": ForecastConsensus(
+            market_id="m1",
+            location="New York, NY",
+            forecast_date=date(2026, 1, 5),
+            consensus_probability=0.70,
+            confidence=0.40,
+            dispersion=0.25,
+            freshness_minutes=240,
+            stale=True,
+        )
+    }
+
+    ranked = engine.rank_weather_candidates(
+        markets,
+        price_snapshots=price_snapshots,
+        consensuses=consensuses,
+        portfolio_equity=10_000,
+        max_candidates=5,
+        per_market_cap_usd=50.0,
+    )
+
+    assert ranked == []

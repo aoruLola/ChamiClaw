@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import shutil
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,6 +15,9 @@ from chamiclaw.adapters.simmer import SimmerAdapter
 from chamiclaw.clients.brave import BraveClient
 from chamiclaw.clients.clob import CLOBClient
 from chamiclaw.clients.gamma import GammaClient
+from chamiclaw.clients.nws import NwsClient
+from chamiclaw.clients.open_meteo import OpenMeteoClient
+from chamiclaw.clients.openai_compatible import OpenAICompatibleClient
 from chamiclaw.core.models import (
     BacktestRequest,
     InfoSignal,
@@ -49,9 +53,27 @@ repo = build_repository(settings)
 gamma_client = GammaClient(settings.gamma_base_url)
 clob_client = CLOBClient(settings.clob_rest_url, settings.clob_ws_url)
 brave_client = BraveClient(settings.brave_api_key)
+openmeteo_client = OpenMeteoClient(settings.openmeteo_base_url)
+nws_client = NwsClient(settings.nws_base_url)
+llm_review_client = (
+    OpenAICompatibleClient(
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
+        timeout_seconds=settings.llm_timeout_seconds,
+        max_retries=settings.llm_max_retries,
+        temperature=settings.llm_decision_temperature,
+    )
+    if settings.llm_enabled
+    else None
+)
 market_service = MarketService(gamma_client=gamma_client)
 price_engine = PriceEngine()
-info_engine = InfoEngine(brave_client=brave_client)
+info_engine = InfoEngine(
+    brave_client=brave_client,
+    openmeteo_client=openmeteo_client,
+    nws_client=nws_client,
+)
 mode_engine = ModeEngine()
 strategy_engine = StrategyEngine()
 risk_engine = RiskEngine()
@@ -90,10 +112,18 @@ orchestrator = RuntimeOrchestrator(
     anomaly_debounce_seconds=settings.price_flush_seconds,
     execution_rate_limit_per_market_per_minute=settings.execution_rate_limit_per_market_per_minute,
     execution_rate_limit_global_per_minute=settings.execution_rate_limit_global_per_minute,
+    llm_review_client=llm_review_client,
+    llm_failsafe_mode=settings.llm_failsafe_mode,
+    weather_batch_max_orders=settings.weather_batch_max_orders,
+    weather_max_batch_risk_usd=settings.weather_max_batch_risk_usd,
 )
 scheduler = TaskScheduler(settings)
 backtest_engine = BacktestEngine()
 online_tuner = OnlineTuner(backtest_engine=backtest_engine)
+
+
+def _weather_market_pool_size() -> int:
+    return max(settings.weather_batch_max_candidates * 5, settings.weather_batch_max_orders * 5, 25)
 
 
 def _persist_current_params_to_path() -> bool:
@@ -139,10 +169,18 @@ _persist_current_params_to_path()
 
 
 async def _strategy_job() -> int:
+    if settings.weather_enabled:
+        summary = await orchestrator.run_weather_batch(
+            max_candidates=settings.weather_batch_max_candidates,
+            per_market_cap_usd=settings.weather_max_position_per_market_usd,
+        )
+        return int(summary['executed'])
     return await orchestrator.strategy_loop()
 
 
 async def _market_refresh_job() -> int:
+    if settings.weather_enabled:
+        return len(await orchestrator.bootstrap_market_pool(top_n=_weather_market_pool_size()))
     return orchestrator.market_refresh()
 
 
@@ -151,6 +189,8 @@ async def _price_job() -> int:
 
 
 async def _info_refresh_job() -> int:
+    if settings.weather_enabled:
+        return await orchestrator.info_refresh_weather(top_n=_weather_market_pool_size())
     return orchestrator.info_refresh()
 
 
@@ -208,6 +248,14 @@ def build_preflight_report() -> dict:
     checks.append(PreflightCheck(name="gamma_connectivity", ok=gamma_ok, message=gamma_msg))
     clob_ok, clob_msg = _probe_http(f"{settings.clob_rest_url}/book?market=healthcheck")
     checks.append(PreflightCheck(name="clob_connectivity", ok=clob_ok, message=clob_msg))
+    if settings.weather_enabled:
+        openmeteo_ok, openmeteo_msg = _probe_http(f"{settings.openmeteo_base_url}/forecast")
+        checks.append(PreflightCheck(name="openmeteo_connectivity", ok=openmeteo_ok, message=openmeteo_msg))
+        nws_ok, nws_msg = _probe_http(f"{settings.nws_base_url}/points/39.7456,-97.0892")
+        checks.append(PreflightCheck(name="nws_connectivity", ok=nws_ok, message=nws_msg))
+    if settings.llm_enabled:
+        llm_ok, llm_msg = _probe_http(f"{settings.llm_base_url}/models")
+        checks.append(PreflightCheck(name="llm_connectivity", ok=llm_ok, message=llm_msg))
     if execution_engine.dry_run:
         checks.append(PreflightCheck(name="simmer_connectivity", ok=True, message="skipped_in_dry_run"))
     else:
@@ -247,9 +295,19 @@ def build_preflight_report() -> dict:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     scheduler_started = scheduler.start()
-    market_ids = await orchestrator.bootstrap_market_pool(top_n=10)
+    market_ids: list[str] = []
+    try:
+        market_ids = await orchestrator.bootstrap_market_pool(
+            top_n=_weather_market_pool_size() if settings.weather_enabled else 10
+        )
+    except Exception as exc:
+        logger.warning("startup_market_bootstrap_failed", error=str(exc))
     if not market_ids:
-        market_ids = orchestrator.refresh_market_subscriptions()
+        try:
+            market_ids = orchestrator.refresh_market_subscriptions()
+        except Exception as exc:
+            logger.warning("startup_market_subscription_refresh_failed", error=str(exc))
+            market_ids = []
     restored_compensations = orchestrator.restore_execution_compensations()
     repo.update_price_stream_state(running=True, reconnects=clob_client.reconnect_count)
     stream_task = asyncio.create_task(orchestrator.run_price_stream(market_ids), name="price-stream")
@@ -291,6 +349,9 @@ async def health() -> dict:
         "price_stream_running": repo.price_stream_running,
         "price_stream_last_event_ts": repo.price_stream_last_event_ts.isoformat() if repo.price_stream_last_event_ts else None,
         "price_stream_reconnects": repo.price_stream_reconnects,
+        "weather_enabled": settings.weather_enabled,
+        "llm_enabled": settings.llm_enabled,
+        "last_weather_batch": orchestrator.last_weather_batch_summary,
     }
 
 
@@ -314,6 +375,9 @@ async def ops_state() -> dict:
             "pause_until": repo.portfolio.pause_until.isoformat() if repo.portfolio.pause_until else None,
             "consecutive_losses": repo.portfolio.consecutive_losses,
         },
+        "weather_enabled": settings.weather_enabled,
+        "llm_enabled": settings.llm_enabled,
+        "last_weather_batch": orchestrator.last_weather_batch_summary,
     }
 
 
@@ -343,6 +407,23 @@ async def set_strategy_params(payload: StrategyParamsSetRequest, dry_run: bool =
     _persist_current_params_to_path()
     logger.info("strategy_params_set", version_id=saved.version_id, source=payload.source)
     return saved.model_dump(mode="json")
+
+
+@app.post("/ops/emergency/stop")
+async def emergency_stop(pause_minutes: int = 24 * 60, reason: str = "manual_stop") -> dict:
+    repo.portfolio.daily_halt = True
+    if pause_minutes > 0:
+        repo.portfolio.pause_until = datetime.now(timezone.utc) + timedelta(minutes=pause_minutes)
+    save_fn = getattr(repo, "save_portfolio", None)
+    if callable(save_fn):
+        save_fn()
+    payload = {
+        "daily_halt": repo.portfolio.daily_halt,
+        "pause_until": repo.portfolio.pause_until.isoformat() if repo.portfolio.pause_until else None,
+        "reason": reason,
+    }
+    logger.warning("emergency_stop", **payload)
+    return payload
 
 
 @app.post("/ops/risk/reset")
@@ -413,6 +494,26 @@ async def reset_runtime_state(
 
 @app.post("/ops/tick")
 async def tick_once() -> dict:
+    if settings.weather_enabled:
+        ranked = len(await orchestrator.bootstrap_market_pool(top_n=_weather_market_pool_size()))
+        info = await orchestrator.info_refresh_weather(top_n=_weather_market_pool_size())
+        weather_batch = await orchestrator.run_weather_batch(
+            max_candidates=settings.weather_batch_max_candidates,
+            per_market_cap_usd=settings.weather_max_position_per_market_usd,
+        )
+        reconciled_orders = await orchestrator.reconcile_order_statuses(limit=100)
+        payload = {
+            "ranked": ranked,
+            "info": info,
+            "mode": 0,
+            "executed": weather_batch["executed"],
+            "weather_batch": weather_batch,
+            "reconciled_orders": reconciled_orders,
+            "phase": repo.phase_gate_state.model_dump(mode="json"),
+        }
+        logger.info("tick", **payload)
+        return payload
+
     ranked = orchestrator.market_refresh()
     info = orchestrator.info_refresh()
     info += orchestrator.info_refresh(anomaly_only=True)
@@ -430,6 +531,21 @@ async def tick_once() -> dict:
     }
     logger.info("tick", **payload)
     return payload
+
+
+@app.post("/ops/weather/batch/run")
+async def weather_batch_run(max_candidates: int | None = None, per_market_cap_usd: float | None = None) -> dict:
+    payload = await orchestrator.run_weather_batch(
+        max_candidates=max_candidates,
+        per_market_cap_usd=per_market_cap_usd,
+    )
+    logger.info("weather_batch_run", **payload)
+    return payload
+
+
+@app.get("/ops/weather/batch/last")
+async def weather_batch_last() -> dict:
+    return dict(orchestrator.last_weather_batch_summary)
 
 
 @app.post("/markets/rank")

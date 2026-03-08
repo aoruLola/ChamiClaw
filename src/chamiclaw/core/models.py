@@ -1,6 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from uuid import uuid4
 
@@ -69,6 +69,20 @@ class MarketCard(BaseModel):
     market_score: float = 0.0
 
 
+class WeatherMarketMeta(BaseModel):
+    market_id: str
+    question: str = ""
+    location: str = ""
+    country_code: str = "US"
+    latitude: float = 0.0
+    longitude: float = 0.0
+    weather_type: str = "daily_precipitation"
+    resolution_source: str = ""
+    rule_text: str = ""
+    settlement_date: date | None = None
+    active: bool = True
+
+
 class PriceSnapshot(BaseModel):
     ts: datetime = Field(default_factory=utc_now)
     market_id: str
@@ -106,6 +120,46 @@ class PriceSignal(BaseModel):
     mid: float = 0.5
 
 
+class ForecastSnapshot(BaseModel):
+    ts: datetime = Field(default_factory=utc_now)
+    market_id: str
+    source: str
+    valid_at: datetime
+    updated_at: datetime = Field(default_factory=utc_now)
+    precip_probability: float = 0.0
+    precipitation_mm: float = 0.0
+    source_model: str = ""
+    location: str = ""
+    raw: dict = Field(default_factory=dict)
+
+
+class ForecastConsensus(BaseModel):
+    ts: datetime = Field(default_factory=utc_now)
+    market_id: str
+    location: str = ""
+    forecast_date: date
+    consensus_probability: float = 0.0
+    confidence: float = 0.0
+    dispersion: float = 0.0
+    freshness_minutes: int = 0
+    stale: bool = False
+    snapshots: list[ForecastSnapshot] = Field(default_factory=list)
+    primary_source: str = ""
+
+
+class WeatherEdgeSignal(BaseModel):
+    ts: datetime = Field(default_factory=utc_now)
+    market_id: str
+    market_probability: float
+    consensus_probability: float
+    confidence: float
+    edge: float
+    freshness_minutes: int = 0
+    stale: bool = False
+    tradeable: bool = False
+    risk_tags: list[str] = Field(default_factory=list)
+
+
 class InfoSignal(BaseModel):
     ts: datetime = Field(default_factory=utc_now)
     market_id: str
@@ -115,6 +169,9 @@ class InfoSignal(BaseModel):
     clarification_flag: bool = False
     top_sources: list[dict[str, str | int]] = Field(default_factory=list)
     extracted_claims: list[dict[str, str]] = Field(default_factory=list)
+    forecast_consensus: ForecastConsensus | None = None
+    weather_risk_tags: list[str] = Field(default_factory=list)
+    data_freshness_minutes: int = 0
 
 
 class ModeState(BaseModel):
@@ -147,6 +204,43 @@ class OrderIntent(BaseModel):
     thesis: str
     ttl_seconds: int = 60
     idempotency_key: str = ""
+
+
+class BatchTradeCandidate(BaseModel):
+    ts: datetime = Field(default_factory=utc_now)
+    market_id: str
+    market_question: str = ""
+    market_probability: float
+    consensus_probability: float
+    consensus_confidence: float
+    edge: float
+    data_freshness_minutes: int = 0
+    suggested_size_usd: float = 0.0
+    weather_meta: WeatherMarketMeta | None = None
+    risk_tags: list[str] = Field(default_factory=list)
+
+
+class LlmReviewRequest(BaseModel):
+    market_id: str
+    market_question: str
+    market_rule: str
+    location: str
+    forecast_date: date
+    market_probability: float
+    consensus_probability: float
+    consensus_confidence: float
+    data_freshness_minutes: int
+    edge: float
+    suggested_size_usd: float
+    risk_tags: list[str] = Field(default_factory=list)
+
+
+class LlmReviewDecision(BaseModel):
+    decision: str = "reject"
+    size_multiplier: float = 0.0
+    confidence: float = 0.0
+    risk_tags: list[str] = Field(default_factory=list)
+    reason_summary: str = ""
 
 
 class Position(BaseModel):

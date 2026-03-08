@@ -1,4 +1,4 @@
-import os
+﻿import os
 from pathlib import Path
 
 import pytest
@@ -122,3 +122,35 @@ def test_settings_environment_variable_overrides_dotenv(monkeypatch, tmp_path: P
     settings = AppSettings.load()
 
     assert settings.repository_backend == "memory"
+
+
+def test_settings_loads_weather_and_llm_defaults(monkeypatch):
+    monkeypatch.setenv("EXECUTION_DRY_RUN", "true")
+    monkeypatch.delenv("LLM_ENABLED", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    settings = AppSettings.load()
+
+    assert settings.weather_enabled is True
+    assert settings.weather_only_us_markets is True
+    assert settings.weather_market_type == "daily_precipitation"
+    assert settings.weather_batch_max_candidates == 12
+    assert settings.weather_batch_max_orders == 6
+    assert settings.weather_market_refresh_minutes == 360
+    assert settings.weather_info_refresh_minutes == 360
+    assert settings.weather_strategy_loop_minutes == 720
+    assert settings.llm_enabled is False
+    assert settings.llm_failsafe_mode == "reject"
+
+
+def test_settings_requires_llm_credentials_when_enabled(monkeypatch):
+    monkeypatch.setenv("EXECUTION_DRY_RUN", "true")
+    monkeypatch.setenv("LLM_ENABLED", "true")
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    with pytest.raises(ValueError):
+        AppSettings.load()

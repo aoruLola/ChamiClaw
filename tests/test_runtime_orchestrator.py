@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import asyncio
 
@@ -7,7 +7,10 @@ from chamiclaw.adapters.base import ExecutionAdapter
 from chamiclaw.clients.clob import CLOBClient
 from chamiclaw.core.models import (
     Action,
+    BatchTradeCandidate,
+    ForecastConsensus,
     InfoSignal,
+    LlmReviewDecision,
     MarketCard,
     Mode,
     ModeState,
@@ -25,6 +28,7 @@ from chamiclaw.core.models import (
     PriceSignal,
     Side,
     SpreadStatus,
+    WeatherMarketMeta,
 )
 from chamiclaw.engines.execution import ExecutionEngine
 from chamiclaw.engines.info import InfoEngine
@@ -774,3 +778,195 @@ def test_runtime_apply_execution_result_records_trade_and_evaluates_phase_gate()
     assert repo.trade_stats.total_trades == 1
     assert repo.trade_stats.wins == 1
     assert repo.phase_gate_state.allowed_mode_b is True
+
+
+
+class ApproveReviewClient:
+    async def review_trade(self, _request):
+        return LlmReviewDecision(decision="approve", size_multiplier=1.0, confidence=0.91, risk_tags=[], reason_summary="ok")
+
+
+class ResizeReviewClient:
+    async def review_trade(self, _request):
+        return LlmReviewDecision(decision="resize", size_multiplier=0.5, confidence=0.84, risk_tags=["forecast_divergence"], reason_summary="reduce")
+
+
+class FailingReviewClient:
+    async def review_trade(self, _request):
+        raise ValueError("bad response")
+
+
+class WeatherInfoEngine(InfoEngine):
+    async def fetch_weather_signal(self, meta: WeatherMarketMeta, *, forecast_date: date):
+        return InfoSignal(
+            market_id=meta.market_id,
+            risk_score=0.2,
+            confirmation_level=2,
+            forecast_consensus=ForecastConsensus(
+                market_id=meta.market_id,
+                location=meta.location,
+                forecast_date=forecast_date,
+                consensus_probability=0.66,
+                confidence=0.78,
+                dispersion=0.09,
+                freshness_minutes=18,
+            ),
+        )
+
+
+class WeatherMarketService(MarketService):
+    def extract_weather_markets(self, cards: list[MarketCard], top_n: int = 10):
+        _ = cards, top_n
+        return [WeatherMarketMeta(market_id="m1", question="Will it rain in NYC tomorrow?", location="New York, NY")]
+
+
+def test_runtime_info_refresh_weather_fetches_signals_for_weather_markets():
+    repo = InMemoryRepository()
+    repo.upsert_market(
+        MarketCard(
+            market_id="m1",
+            question="Will it rain in New York, NY tomorrow?",
+            end_time=datetime.now(timezone.utc) + timedelta(days=1),
+            status="active",
+            rule_text="Official NOAA precipitation observation.",
+            rule_summary="New York, NY",
+            resolution_sources=["NOAA"],
+            rule_clarity_score=0.95,
+            liquidity_score=0.8,
+            spread_stability=0.8,
+            volume_density=0.8,
+        )
+    )
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=WeatherMarketService(),
+        info_engine=WeatherInfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+    )
+
+    refreshed = asyncio.run(orchestrator.info_refresh_weather())
+
+    assert refreshed == 1
+    assert repo.info_signals["m1"].forecast_consensus is not None
+    assert repo.info_signals["m1"].forecast_consensus.consensus_probability == 0.66
+
+
+def test_runtime_review_weather_candidates_applies_resize():
+    repo = InMemoryRepository()
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        llm_review_client=ResizeReviewClient(),
+    )
+    candidates = [
+        BatchTradeCandidate(
+            market_id="m1",
+            market_question="Will it rain in NYC?",
+            market_probability=0.40,
+            consensus_probability=0.70,
+            consensus_confidence=0.80,
+            edge=0.30,
+            suggested_size_usd=40.0,
+            weather_meta=WeatherMarketMeta(market_id="m1", question="Will it rain in NYC?", location="New York, NY", rule_text="official source"),
+        )
+    ]
+
+    reviewed = asyncio.run(orchestrator.review_weather_candidates(candidates))
+
+    assert len(reviewed) == 1
+    assert reviewed[0].suggested_size_usd == 20.0
+
+
+def test_runtime_review_weather_candidates_rejects_on_llm_failure_when_failsafe_is_reject():
+    repo = InMemoryRepository()
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        llm_review_client=FailingReviewClient(),
+        llm_failsafe_mode="reject",
+    )
+    candidates = [
+        BatchTradeCandidate(
+            market_id="m1",
+            market_question="Will it rain in NYC?",
+            market_probability=0.40,
+            consensus_probability=0.70,
+            consensus_confidence=0.80,
+            edge=0.30,
+            suggested_size_usd=40.0,
+            weather_meta=WeatherMarketMeta(market_id="m1", question="Will it rain in NYC?", location="New York, NY", rule_text="official source"),
+        )
+    ]
+
+    reviewed = asyncio.run(orchestrator.review_weather_candidates(candidates))
+
+    assert reviewed == []
+
+
+def test_runtime_run_weather_batch_executes_reviewed_candidates():
+    repo = InMemoryRepository()
+    repo.upsert_market(
+        MarketCard(
+            market_id="m1",
+            question="Will it rain in NYC tomorrow?",
+            end_time=datetime.now(timezone.utc) + timedelta(days=1),
+            status="active",
+            rule_text="Official NOAA precipitation measurement determines outcome.",
+            rule_summary="New York, NY",
+            liquidity_score=0.8,
+            spread_stability=0.8,
+            volume_density=0.8,
+            rule_clarity_score=0.9,
+        )
+    )
+    repo.put_price_snapshot(
+        PriceSnapshot(market_id="m1", best_bid=0.39, best_ask=0.41, mid=0.40, spread=0.02, last=0.40)
+    )
+    repo.put_info_signal(
+        InfoSignal(
+            market_id="m1",
+            risk_score=0.2,
+            confirmation_level=2,
+            forecast_consensus=ForecastConsensus(
+                market_id="m1",
+                location="New York, NY",
+                forecast_date=datetime.now(timezone.utc).date(),
+                consensus_probability=0.70,
+                confidence=0.80,
+                dispersion=0.1,
+                freshness_minutes=20,
+            ),
+        )
+    )
+
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        llm_review_client=ApproveReviewClient(),
+    )
+
+    summary = asyncio.run(orchestrator.run_weather_batch(max_candidates=5, per_market_cap_usd=40.0))
+
+    assert summary["candidates"] == 1
+    assert summary["reviewed"] == 1
+    assert summary["executed"] == 1
+    assert len(repo.order_records) == 1
+

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from pathlib import Path
@@ -41,6 +41,26 @@ class AppSettings(BaseModel):
     run_profile: str = "sim"
     params_path: str = "data/strategy_params.json"
     data_retention_days: int = 30
+    weather_enabled: bool = True
+    weather_only_us_markets: bool = True
+    weather_market_type: str = "daily_precipitation"
+    weather_batch_max_candidates: int = 12
+    weather_batch_max_orders: int = 6
+    weather_market_refresh_minutes: int = 360
+    weather_info_refresh_minutes: int = 360
+    weather_strategy_loop_minutes: int = 720
+    weather_max_position_per_market_usd: float = 50.0
+    weather_max_batch_risk_usd: float = 200.0
+    openmeteo_base_url: str = "https://api.open-meteo.com/v1"
+    nws_base_url: str = "https://api.weather.gov"
+    llm_enabled: bool = False
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_model: str = ""
+    llm_timeout_seconds: float = 10.0
+    llm_max_retries: int = 1
+    llm_decision_temperature: float = 0.0
+    llm_failsafe_mode: str = "reject"
 
     @staticmethod
     def _as_bool(value: str, default: bool = False) -> bool:
@@ -89,6 +109,57 @@ class AppSettings(BaseModel):
             raise ValueError("RUN_PROFILE must be one of: sim, live.")
         if data_retention_days <= 0:
             raise ValueError("DATA_RETENTION_DAYS must be > 0.")
+
+    @staticmethod
+    def _validate_weather_runtime(
+        *,
+        weather_batch_max_candidates: int,
+        weather_batch_max_orders: int,
+        weather_market_refresh_minutes: int,
+        weather_info_refresh_minutes: int,
+        weather_strategy_loop_minutes: int,
+        weather_max_position_per_market_usd: float,
+        weather_max_batch_risk_usd: float,
+    ) -> None:
+        if weather_batch_max_candidates <= 0:
+            raise ValueError("WEATHER_BATCH_MAX_CANDIDATES must be > 0.")
+        if weather_batch_max_orders <= 0:
+            raise ValueError("WEATHER_BATCH_MAX_ORDERS must be > 0.")
+        if weather_batch_max_orders > weather_batch_max_candidates:
+            raise ValueError("WEATHER_BATCH_MAX_ORDERS must be <= WEATHER_BATCH_MAX_CANDIDATES.")
+        if weather_market_refresh_minutes <= 0:
+            raise ValueError("WEATHER_MARKET_REFRESH_MINUTES must be > 0.")
+        if weather_info_refresh_minutes <= 0:
+            raise ValueError("WEATHER_INFO_REFRESH_MINUTES must be > 0.")
+        if weather_strategy_loop_minutes <= 0:
+            raise ValueError("WEATHER_STRATEGY_LOOP_MINUTES must be > 0.")
+        if weather_max_position_per_market_usd <= 0:
+            raise ValueError("WEATHER_MAX_POSITION_PER_MARKET_USD must be > 0.")
+        if weather_max_batch_risk_usd <= 0:
+            raise ValueError("WEATHER_MAX_BATCH_RISK_USD must be > 0.")
+
+    @staticmethod
+    def _validate_llm_runtime(
+        *,
+        llm_enabled: bool,
+        llm_base_url: str,
+        llm_api_key: str,
+        llm_model: str,
+        llm_timeout_seconds: float,
+        llm_max_retries: int,
+        llm_decision_temperature: float,
+        llm_failsafe_mode: str,
+    ) -> None:
+        if llm_timeout_seconds <= 0:
+            raise ValueError("LLM_TIMEOUT_SECONDS must be > 0.")
+        if llm_max_retries < 0:
+            raise ValueError("LLM_MAX_RETRIES must be >= 0.")
+        if not 0 <= llm_decision_temperature <= 2:
+            raise ValueError("LLM_DECISION_TEMPERATURE must be in [0, 2].")
+        if llm_failsafe_mode not in {"reject", "min_size"}:
+            raise ValueError("LLM_FAILSAFE_MODE must be one of: reject, min_size.")
+        if llm_enabled and (not llm_base_url or not llm_api_key or not llm_model):
+            raise ValueError("LLM_BASE_URL, LLM_API_KEY, and LLM_MODEL are required when LLM_ENABLED=true.")
 
     @classmethod
     def load(cls) -> "AppSettings":
@@ -144,6 +215,42 @@ class AppSettings(BaseModel):
         data_retention_days = int(os.getenv("DATA_RETENTION_DAYS", "30"))
         cls._validate_local_runtime(run_profile=run_profile, data_retention_days=data_retention_days)
 
+        weather_batch_max_candidates = int(os.getenv("WEATHER_BATCH_MAX_CANDIDATES", "12"))
+        weather_batch_max_orders = int(os.getenv("WEATHER_BATCH_MAX_ORDERS", "6"))
+        weather_market_refresh_minutes = int(os.getenv("WEATHER_MARKET_REFRESH_MINUTES", "360"))
+        weather_info_refresh_minutes = int(os.getenv("WEATHER_INFO_REFRESH_MINUTES", "360"))
+        weather_strategy_loop_minutes = int(os.getenv("WEATHER_STRATEGY_LOOP_MINUTES", "720"))
+        weather_max_position_per_market_usd = float(os.getenv("WEATHER_MAX_POSITION_PER_MARKET_USD", "50.0"))
+        weather_max_batch_risk_usd = float(os.getenv("WEATHER_MAX_BATCH_RISK_USD", "200.0"))
+        cls._validate_weather_runtime(
+            weather_batch_max_candidates=weather_batch_max_candidates,
+            weather_batch_max_orders=weather_batch_max_orders,
+            weather_market_refresh_minutes=weather_market_refresh_minutes,
+            weather_info_refresh_minutes=weather_info_refresh_minutes,
+            weather_strategy_loop_minutes=weather_strategy_loop_minutes,
+            weather_max_position_per_market_usd=weather_max_position_per_market_usd,
+            weather_max_batch_risk_usd=weather_max_batch_risk_usd,
+        )
+
+        llm_enabled = cls._as_bool(os.getenv("LLM_ENABLED", "false"), default=False)
+        llm_base_url = os.getenv("LLM_BASE_URL", "").strip()
+        llm_api_key = os.getenv("LLM_API_KEY", "").strip()
+        llm_model = os.getenv("LLM_MODEL", "").strip()
+        llm_timeout_seconds = float(os.getenv("LLM_TIMEOUT_SECONDS", "10.0"))
+        llm_max_retries = int(os.getenv("LLM_MAX_RETRIES", "1"))
+        llm_decision_temperature = float(os.getenv("LLM_DECISION_TEMPERATURE", "0.0"))
+        llm_failsafe_mode = os.getenv("LLM_FAILSAFE_MODE", "reject").strip().lower() or "reject"
+        cls._validate_llm_runtime(
+            llm_enabled=llm_enabled,
+            llm_base_url=llm_base_url,
+            llm_api_key=llm_api_key,
+            llm_model=llm_model,
+            llm_timeout_seconds=llm_timeout_seconds,
+            llm_max_retries=llm_max_retries,
+            llm_decision_temperature=llm_decision_temperature,
+            llm_failsafe_mode=llm_failsafe_mode,
+        )
+
         return cls(
             scheduler_enabled=os.getenv("SCHEDULER_ENABLED", "false").lower() == "true",
             repository_backend=os.getenv("REPOSITORY_BACKEND", "memory"),
@@ -175,6 +282,26 @@ class AppSettings(BaseModel):
             run_profile=run_profile,
             params_path=os.getenv("PARAMS_PATH", "data/strategy_params.json"),
             data_retention_days=data_retention_days,
+            weather_enabled=cls._as_bool(os.getenv("WEATHER_ENABLED", "true"), default=True),
+            weather_only_us_markets=cls._as_bool(os.getenv("WEATHER_ONLY_US_MARKETS", "true"), default=True),
+            weather_market_type=os.getenv("WEATHER_MARKET_TYPE", "daily_precipitation").strip() or "daily_precipitation",
+            weather_batch_max_candidates=weather_batch_max_candidates,
+            weather_batch_max_orders=weather_batch_max_orders,
+            weather_market_refresh_minutes=weather_market_refresh_minutes,
+            weather_info_refresh_minutes=weather_info_refresh_minutes,
+            weather_strategy_loop_minutes=weather_strategy_loop_minutes,
+            weather_max_position_per_market_usd=weather_max_position_per_market_usd,
+            weather_max_batch_risk_usd=weather_max_batch_risk_usd,
+            openmeteo_base_url=os.getenv("OPENMETEO_BASE_URL", "https://api.open-meteo.com/v1").strip() or "https://api.open-meteo.com/v1",
+            nws_base_url=os.getenv("NWS_BASE_URL", "https://api.weather.gov").strip() or "https://api.weather.gov",
+            llm_enabled=llm_enabled,
+            llm_base_url=llm_base_url,
+            llm_api_key=llm_api_key,
+            llm_model=llm_model,
+            llm_timeout_seconds=llm_timeout_seconds,
+            llm_max_retries=llm_max_retries,
+            llm_decision_temperature=llm_decision_temperature,
+            llm_failsafe_mode=llm_failsafe_mode,
         )
 
     @staticmethod
@@ -204,4 +331,3 @@ class AppSettings(BaseModel):
             if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
                 value = value[1:-1]
             os.environ[key] = value
-

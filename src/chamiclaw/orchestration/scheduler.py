@@ -23,10 +23,17 @@ class TaskScheduler:
         strategy_loop_fn: Callable,
         info_refresh_fn: Callable,
     ) -> None:
-        self.register("market_refresh", self.settings.market_refresh_minutes * 60, market_refresh_fn)
+        market_refresh_minutes = self.settings.market_refresh_minutes
+        info_refresh_minutes = self.settings.info_refresh_minutes
+        strategy_loop_minutes = self.settings.strategy_loop_minutes
+        if self.settings.weather_enabled:
+            market_refresh_minutes = self.settings.weather_market_refresh_minutes
+            info_refresh_minutes = self.settings.weather_info_refresh_minutes
+            strategy_loop_minutes = self.settings.weather_strategy_loop_minutes
+        self.register("market_refresh", market_refresh_minutes * 60, market_refresh_fn)
         self.register("price_aggregate", self.settings.price_aggregate_seconds, price_aggregate_fn)
-        self.register("strategy_loop", self.settings.strategy_loop_minutes * 60, strategy_loop_fn)
-        self.register("info_refresh", self.settings.info_refresh_minutes * 60, info_refresh_fn)
+        self.register("strategy_loop", strategy_loop_minutes * 60, strategy_loop_fn)
+        self.register("info_refresh", info_refresh_minutes * 60, info_refresh_fn)
 
     def start(self) -> bool:
         if not self.settings.scheduler_enabled:

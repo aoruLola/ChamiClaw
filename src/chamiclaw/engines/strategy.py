@@ -1,16 +1,20 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from chamiclaw.core.models import (
     Action,
+    BatchTradeCandidate,
+    ForecastConsensus,
     Mode,
     ModeState,
     OrderIntent,
     OrderMode,
     OrderType,
     PriceSignal,
+    PriceSnapshot,
     Side,
     StrategyParams,
     TradeStats,
+    WeatherMarketMeta,
 )
 
 
@@ -32,6 +36,46 @@ class StrategyEngine:
     def configure(self, params: StrategyParams) -> None:
         self.params = params.model_copy(deep=True)
 
+    def rank_weather_candidates(
+        self,
+        markets: list[WeatherMarketMeta],
+        *,
+        price_snapshots: dict[str, PriceSnapshot],
+        consensuses: dict[str, ForecastConsensus],
+        portfolio_equity: float,
+        max_candidates: int,
+        per_market_cap_usd: float,
+        min_edge: float = 0.08,
+        min_confidence: float = 0.55,
+    ) -> list[BatchTradeCandidate]:
+        candidates: list[BatchTradeCandidate] = []
+        for market in markets:
+            snapshot = price_snapshots.get(market.market_id)
+            consensus = consensuses.get(market.market_id)
+            if snapshot is None or consensus is None:
+                continue
+            if consensus.stale or consensus.confidence < min_confidence:
+                continue
+            edge = round(consensus.consensus_probability - snapshot.mid, 4)
+            if abs(edge) < min_edge:
+                continue
+            candidates.append(
+                BatchTradeCandidate(
+                    market_id=market.market_id,
+                    market_question=market.question,
+                    market_probability=snapshot.mid,
+                    consensus_probability=consensus.consensus_probability,
+                    consensus_confidence=consensus.confidence,
+                    edge=edge,
+                    data_freshness_minutes=consensus.freshness_minutes,
+                    suggested_size_usd=min(per_market_cap_usd, portfolio_equity),
+                    weather_meta=market.model_copy(deep=True),
+                    risk_tags=[tag for tag in ["daily_precipitation"] if tag],
+                )
+            )
+        ranked = sorted(candidates, key=lambda item: abs(item.edge) * item.consensus_confidence, reverse=True)
+        return ranked[: max(max_candidates, 0)]
+
     def generate_intent(
         self,
         equity: float,
@@ -48,7 +92,6 @@ class StrategyEngine:
         if mode_state.mode == Mode.NO_TRADE:
             return None
 
-        # Exit rules are evaluated first when a position is already open.
         if position_size > 0 and position_avg_price and position_avg_price > 0:
             close_side = Side.YES
             if position_side is not None:
