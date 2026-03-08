@@ -1,81 +1,131 @@
 # ChamiClaw
 
-Polymarket 分钟级量化系统（实验级）最小可运行骨架（推进到 T1）：
+ChamiClaw is a Polymarket weather trading service focused on US daily precipitation markets. The current runtime is designed for low-frequency batch execution: weather market discovery, forecast aggregation, rule-based candidate ranking, optional OpenAI-compatible LLM review, risk checks, and automated execution.
 
-- Gamma API → Market Service（5 分钟）
-- CLOB WS/REST → Price Engine（30 秒聚合）
-- Brave Search → Info Engine（10 分钟 + 异常触发）
-- Mode Engine（A / B_ALLOWED / NO_TRADE）
-- Strategy Engine（3 分钟轮询）
-- Risk Engine（独立否决）
-- Execution Adapter（默认 Simmer，可替换）
-- Portfolio Engine（成交驱动）
-- Runtime Orchestrator + Cadence Scheduler（T1）
+## What Runs in Production
 
-## 快速启动
+The production target is a single long-lived Linux container:
+
+- FastAPI serves health and ops endpoints.
+- APScheduler runs the weather jobs inside the container when `SCHEDULER_ENABLED=true`.
+- SQLite and strategy params are stored on a mounted data volume.
+- Generic webhook notifications send structured JSON for key events.
+
+## Quick Start (Linux Docker)
+
+1. Copy [`.env.example`](/E:/Project/ChamiClaw/.worktrees/weather-precip-auto/.env.example) to `.env` and fill in real credentials.
+2. Keep `REPOSITORY_BACKEND=sqlite` and point `SQLITE_PATH` / `PARAMS_PATH` at the mounted data directory.
+3. Enable scheduler and, if desired, webhook + LLM review.
+
+```bash
+cp .env.example .env
+docker compose up --build -d
+```
+
+Health and ops endpoints:
+
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/ops/preflight
+curl -X POST http://127.0.0.1:8000/ops/tick
+curl -X POST "http://127.0.0.1:8000/ops/emergency/stop?pause_minutes=1440&reason=manual_stop"
+```
+
+## Important Environment Variables
+
+Core runtime:
+
+- `RUN_PROFILE=sim|live`
+- `EXECUTION_DRY_RUN=true|false`
+- `SCHEDULER_ENABLED=true|false`
+- `REPOSITORY_BACKEND=sqlite`
+- `SQLITE_PATH=/app/data/chamiclaw_t1.db`
+- `PARAMS_PATH=/app/data/strategy_params.json`
+
+Weather strategy:
+
+- `WEATHER_ENABLED=true`
+- `WEATHER_BATCH_MAX_CANDIDATES=12`
+- `WEATHER_BATCH_MAX_ORDERS=6`
+- `WEATHER_MARKET_REFRESH_MINUTES=360`
+- `WEATHER_INFO_REFRESH_MINUTES=360`
+- `WEATHER_STRATEGY_LOOP_MINUTES=720`
+- `WEATHER_MAX_POSITION_PER_MARKET_USD=50`
+- `WEATHER_MAX_BATCH_RISK_USD=200`
+
+LLM review:
+
+- `LLM_ENABLED=true|false`
+- `LLM_BASE_URL=...`
+- `LLM_API_KEY=...`
+- `LLM_MODEL=...`
+- `LLM_FAILSAFE_MODE=reject|min_size`
+
+Webhook notifications:
+
+- `WEBHOOK_ENABLED=true|false`
+- `WEBHOOK_URL=https://claw.alyra.cn/Claw`
+- `WEBHOOK_TIMEOUT_SECONDS=5`
+- `WEBHOOK_MAX_RETRIES=1`
+- `WEBHOOK_SERVICE_NAME=chamiclaw`
+- `WEBHOOK_ENVIRONMENT=prod`
+
+## Webhook Payload
+
+The service sends generic `POST JSON` notifications. Payload shape:
+
+```json
+{
+  "event_type": "weather_batch_completed",
+  "ts": "2026-03-08T14:00:00+00:00",
+  "service": "chamiclaw",
+  "environment": "prod",
+  "summary": "manual weather batch completed",
+  "details": {
+    "candidates": 3,
+    "reviewed": 2,
+    "executed": 1,
+    "rejected": 1
+  }
+}
+```
+
+Current key events:
+
+- `preflight_failed`
+- `weather_batch_completed`
+- `emergency_stop_triggered`
+- `llm_review_failed`
+- `execution_error`
+- `startup_degraded`
+
+Webhook delivery failures are logged and counted, but they do not stop trading or scheduling.
+
+## Useful Ops Endpoints
+
+- `GET /health`
+- `GET /ops/state`
+- `GET /ops/preflight`
+- `GET /ops/notifications/health`
+- `POST /ops/tick`
+- `POST /ops/weather/batch/run`
+- `GET /ops/weather/batch/last`
+- `POST /ops/emergency/stop`
+
+## Local Python Run
+
+If you want to run without Docker:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
-uvicorn chamiclaw.api.app:app --reload
+uvicorn chamiclaw.api.app:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-## 配置（T1）
+Or use the CLI:
 
-可通过环境变量切换仓储后端：
-
-- `REPOSITORY_BACKEND=memory|sqlite`（默认 `memory`）
-- `SQLITE_PATH=data/chamiclaw_t1.db`
-- `SCHEDULER_ENABLED=true|false`（默认 `false`）
-- `LOG_LEVEL=INFO|DEBUG|...`（默认 `INFO`）
-- `GAMMA_BASE_URL=https://gamma-api.polymarket.com`
-- `CLOB_WS_URL=wss://ws-subscriptions-clob.polymarket.com/ws/market`
-- `CLOB_REST_URL=https://clob.polymarket.com`
-- `BRAVE_API_KEY=...`（可选，空值时退化为占位打分）
-- `SIMMER_BASE_URL=...`（`EXECUTION_DRY_RUN=false` 时必填）
-- `SIMMER_API_KEY=...`（`EXECUTION_DRY_RUN=false` 时必填）
-- `EXECUTION_DRY_RUN=true|false`（默认 `true`）
-- `PHASE_GATE_ENABLED=true|false`（默认 `true`）
-- `PHASE1_MIN_TRADES=200`
-- `PHASE1_MIN_WIN_RATE=0.57`
-- `PHASE1_MIN_RR=1.1`
-- `PHASE1_MAX_DRAWDOWN=0.05`
-
-## API（当前最小实现）
-
-- `GET /health`
-- `GET /ops/state`（查看内存/仓储运行状态，含 risk_controls）
-- `GET /ops/config`（查看当前运行配置）
-- `POST /ops/tick`（执行一次完整编排周期）
-- `POST /ops/risk/reset`（重置风控冷却/日内停机状态）
-- `POST /ops/trade-stats/reset`（重置交易计数）
-- `POST /ops/portfolio/apply-pnl`（注入已实现PnL并更新组合状态）
-- `POST /ops/state/reset`（清空运行态缓存信号，可选清空市场池/交易统计/风控控制位）
-- `GET /ops/phase`（查看阶段门槛状态）
-- `POST /ops/phase/evaluate`（执行阶段门槛评估，可选 admin_override）
-- `POST /ops/dry-run/set`（切换执行层 dry-run）
-- `POST /ops/replay/run`（按时间窗返回可回放摘要）
-- `GET /ops/metrics/summary`（胜率/盈亏比/回撤等汇总）
-- `POST /markets/rank`
-- `POST /price/ingest`
-- `POST /info/analyze`
-- `POST /mode/decide`
-- `POST /strategy/run`
-
-## 目录
-
-- `src/chamiclaw/core/models.py`: 核心数据模型（Pydantic v2）
-- `src/chamiclaw/engines/`: 市场、价格、信息、状态机、策略、风控、执行、组合引擎
-- `src/chamiclaw/orchestration/runtime.py`: T1 编排器（market/info/mode/strategy loop）
-- `src/chamiclaw/orchestration/scheduler.py`: 运行节奏任务注册 + 可选 APScheduler 启停
-- `src/chamiclaw/adapters/simmer.py`: 默认执行适配器
-- `src/chamiclaw/storage/repository.py`: 内存仓储（后续替换 PostgreSQL / DuckDB）
-- `sql/schema.sql`: 最小表结构草案
-- `tests/`: 关键规则单测
-
-## 运行节奏（默认）
-- Price Engine: 30 秒
-- Strategy Loop: 3 分钟
-- Market Service: 5 分钟
-- Info Engine: 10 分钟（可事件触发）
+```bash
+chamiclaw preflight
+chamiclaw run --profile sim --port 8000
+```

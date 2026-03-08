@@ -18,6 +18,7 @@ from chamiclaw.clients.gamma import GammaClient
 from chamiclaw.clients.nws import NwsClient
 from chamiclaw.clients.open_meteo import OpenMeteoClient
 from chamiclaw.clients.openai_compatible import OpenAICompatibleClient
+from chamiclaw.clients.webhook import WebhookNotifier
 from chamiclaw.core.models import (
     BacktestRequest,
     InfoSignal,
@@ -66,6 +67,14 @@ llm_review_client = (
     )
     if settings.llm_enabled
     else None
+)
+webhook_notifier = WebhookNotifier(
+    url=settings.webhook_url,
+    enabled=settings.webhook_enabled,
+    timeout_seconds=settings.webhook_timeout_seconds,
+    max_retries=settings.webhook_max_retries,
+    service_name=settings.webhook_service_name,
+    environment=settings.webhook_environment,
 )
 market_service = MarketService(gamma_client=gamma_client)
 price_engine = PriceEngine()
@@ -117,6 +126,7 @@ orchestrator = RuntimeOrchestrator(
     weather_batch_max_orders=settings.weather_batch_max_orders,
     weather_max_batch_risk_usd=settings.weather_max_batch_risk_usd,
 )
+orchestrator.notify_event = lambda event_type, summary, details: _send_notification(event_type, summary, details)
 scheduler = TaskScheduler(settings)
 backtest_engine = BacktestEngine()
 online_tuner = OnlineTuner(backtest_engine=backtest_engine)
@@ -124,6 +134,26 @@ online_tuner = OnlineTuner(backtest_engine=backtest_engine)
 
 def _weather_market_pool_size() -> int:
     return max(settings.weather_batch_max_candidates * 5, settings.weather_batch_max_orders * 5, 25)
+
+
+def _notification_health_payload() -> dict[str, object]:
+    enabled = bool(getattr(webhook_notifier, 'enabled', False))
+    last_success_ts = getattr(webhook_notifier, 'last_success_ts', None)
+    last_failure_ts = getattr(webhook_notifier, 'last_failure_ts', None)
+    return {
+        'webhook_enabled': enabled,
+        'webhook_last_success_ts': last_success_ts.isoformat() if last_success_ts else None,
+        'webhook_last_failure_ts': last_failure_ts.isoformat() if last_failure_ts else None,
+        'webhook_failures_total': int(getattr(webhook_notifier, 'failures_total', 0)),
+        'webhook_last_event_type': getattr(webhook_notifier, 'last_event_type', None),
+    }
+
+
+async def _send_notification(event_type: str, summary: str, details: dict) -> bool:
+    send = getattr(webhook_notifier, 'send', None)
+    if send is None:
+        return False
+    return await send(event_type=event_type, summary=summary, details=details)
 
 
 def _persist_current_params_to_path() -> bool:
@@ -173,6 +203,11 @@ async def _strategy_job() -> int:
         summary = await orchestrator.run_weather_batch(
             max_candidates=settings.weather_batch_max_candidates,
             per_market_cap_usd=settings.weather_max_position_per_market_usd,
+        )
+        await _send_notification(
+            'weather_batch_completed',
+            'scheduled weather batch completed',
+            dict(summary),
         )
         return int(summary['executed'])
     return await orchestrator.strategy_loop()
@@ -296,18 +331,32 @@ def build_preflight_report() -> dict:
 async def lifespan(_app: FastAPI):
     scheduler_started = scheduler.start()
     market_ids: list[str] = []
+    bootstrap_error: str | None = None
+    refresh_error: str | None = None
     try:
         market_ids = await orchestrator.bootstrap_market_pool(
             top_n=_weather_market_pool_size() if settings.weather_enabled else 10
         )
     except Exception as exc:
-        logger.warning("startup_market_bootstrap_failed", error=str(exc))
+        bootstrap_error = str(exc)
+        logger.warning("startup_market_bootstrap_failed", error=bootstrap_error)
     if not market_ids:
         try:
             market_ids = orchestrator.refresh_market_subscriptions()
         except Exception as exc:
-            logger.warning("startup_market_subscription_refresh_failed", error=str(exc))
+            refresh_error = str(exc)
+            logger.warning("startup_market_subscription_refresh_failed", error=refresh_error)
             market_ids = []
+    if bootstrap_error or refresh_error or not market_ids:
+        await _send_notification(
+            'startup_degraded',
+            'service started with degraded market bootstrap',
+            {
+                'bootstrap_error': bootstrap_error,
+                'refresh_error': refresh_error,
+                'subscribed_markets': len(market_ids),
+            },
+        )
     restored_compensations = orchestrator.restore_execution_compensations()
     repo.update_price_stream_state(running=True, reconnects=clob_client.reconnect_count)
     stream_task = asyncio.create_task(orchestrator.run_price_stream(market_ids), name="price-stream")
@@ -352,6 +401,7 @@ async def health() -> dict:
         "weather_enabled": settings.weather_enabled,
         "llm_enabled": settings.llm_enabled,
         "last_weather_batch": orchestrator.last_weather_batch_summary,
+        **_notification_health_payload(),
     }
 
 
@@ -378,6 +428,7 @@ async def ops_state() -> dict:
         "weather_enabled": settings.weather_enabled,
         "llm_enabled": settings.llm_enabled,
         "last_weather_batch": orchestrator.last_weather_batch_summary,
+        **_notification_health_payload(),
     }
 
 
@@ -389,6 +440,13 @@ async def ops_config() -> dict:
 @app.get("/ops/preflight")
 async def ops_preflight() -> dict:
     payload = build_preflight_report()
+    if not payload["ok"]:
+        failed_checks = [item for item in payload["checks"] if not item.get("ok")]
+        await _send_notification(
+            'preflight_failed',
+            'preflight report contains failing checks',
+            {'failed_checks': failed_checks},
+        )
     logger.info("ops_preflight", ok=payload["ok"])
     return payload
 
@@ -422,6 +480,7 @@ async def emergency_stop(pause_minutes: int = 24 * 60, reason: str = "manual_sto
         "pause_until": repo.portfolio.pause_until.isoformat() if repo.portfolio.pause_until else None,
         "reason": reason,
     }
+    await _send_notification('emergency_stop_triggered', 'emergency stop activated', dict(payload))
     logger.warning("emergency_stop", **payload)
     return payload
 
@@ -511,6 +570,7 @@ async def tick_once() -> dict:
             "reconciled_orders": reconciled_orders,
             "phase": repo.phase_gate_state.model_dump(mode="json"),
         }
+        await _send_notification('weather_batch_completed', 'weather tick batch completed', dict(weather_batch))
         logger.info("tick", **payload)
         return payload
 
@@ -539,6 +599,7 @@ async def weather_batch_run(max_candidates: int | None = None, per_market_cap_us
         max_candidates=max_candidates,
         per_market_cap_usd=per_market_cap_usd,
     )
+    await _send_notification('weather_batch_completed', 'manual weather batch completed', dict(payload))
     logger.info("weather_batch_run", **payload)
     return payload
 
@@ -546,6 +607,11 @@ async def weather_batch_run(max_candidates: int | None = None, per_market_cap_us
 @app.get("/ops/weather/batch/last")
 async def weather_batch_last() -> dict:
     return dict(orchestrator.last_weather_batch_summary)
+
+
+@app.get("/ops/notifications/health")
+async def notifications_health() -> dict:
+    return _notification_health_payload()
 
 
 @app.post("/markets/rank")

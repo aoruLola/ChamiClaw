@@ -61,6 +61,12 @@ class AppSettings(BaseModel):
     llm_max_retries: int = 1
     llm_decision_temperature: float = 0.0
     llm_failsafe_mode: str = "reject"
+    webhook_enabled: bool = False
+    webhook_url: str = ""
+    webhook_timeout_seconds: float = 5.0
+    webhook_max_retries: int = 1
+    webhook_service_name: str = "chamiclaw"
+    webhook_environment: str = "local"
 
     @staticmethod
     def _as_bool(value: str, default: bool = False) -> bool:
@@ -137,6 +143,21 @@ class AppSettings(BaseModel):
             raise ValueError("WEATHER_MAX_POSITION_PER_MARKET_USD must be > 0.")
         if weather_max_batch_risk_usd <= 0:
             raise ValueError("WEATHER_MAX_BATCH_RISK_USD must be > 0.")
+
+    @staticmethod
+    def _validate_webhook_runtime(
+        *,
+        webhook_enabled: bool,
+        webhook_url: str,
+        webhook_timeout_seconds: float,
+        webhook_max_retries: int,
+    ) -> None:
+        if webhook_timeout_seconds <= 0:
+            raise ValueError("WEBHOOK_TIMEOUT_SECONDS must be > 0.")
+        if webhook_max_retries < 0:
+            raise ValueError("WEBHOOK_MAX_RETRIES must be >= 0.")
+        if webhook_enabled and not webhook_url:
+            raise ValueError("WEBHOOK_URL is required when WEBHOOK_ENABLED=true.")
 
     @staticmethod
     def _validate_llm_runtime(
@@ -240,6 +261,18 @@ class AppSettings(BaseModel):
         llm_max_retries = int(os.getenv("LLM_MAX_RETRIES", "1"))
         llm_decision_temperature = float(os.getenv("LLM_DECISION_TEMPERATURE", "0.0"))
         llm_failsafe_mode = os.getenv("LLM_FAILSAFE_MODE", "reject").strip().lower() or "reject"
+        webhook_enabled = cls._as_bool(os.getenv("WEBHOOK_ENABLED", "false"), default=False)
+        webhook_url = os.getenv("WEBHOOK_URL", "").strip()
+        webhook_timeout_seconds = float(os.getenv("WEBHOOK_TIMEOUT_SECONDS", "5.0"))
+        webhook_max_retries = int(os.getenv("WEBHOOK_MAX_RETRIES", "1"))
+        webhook_service_name = os.getenv("WEBHOOK_SERVICE_NAME", "chamiclaw").strip() or "chamiclaw"
+        webhook_environment = os.getenv("WEBHOOK_ENVIRONMENT", run_profile).strip() or run_profile
+        cls._validate_webhook_runtime(
+            webhook_enabled=webhook_enabled,
+            webhook_url=webhook_url,
+            webhook_timeout_seconds=webhook_timeout_seconds,
+            webhook_max_retries=webhook_max_retries,
+        )
         cls._validate_llm_runtime(
             llm_enabled=llm_enabled,
             llm_base_url=llm_base_url,
@@ -302,6 +335,12 @@ class AppSettings(BaseModel):
             llm_max_retries=llm_max_retries,
             llm_decision_temperature=llm_decision_temperature,
             llm_failsafe_mode=llm_failsafe_mode,
+            webhook_enabled=webhook_enabled,
+            webhook_url=webhook_url,
+            webhook_timeout_seconds=webhook_timeout_seconds,
+            webhook_max_retries=webhook_max_retries,
+            webhook_service_name=webhook_service_name,
+            webhook_environment=webhook_environment,
         )
 
     @staticmethod

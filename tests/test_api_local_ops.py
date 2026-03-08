@@ -90,3 +90,62 @@ def test_online_optimization_endpoint_runs(monkeypatch):
     payload = res.json()
     assert "applied" in payload
     assert "reason" in payload
+
+
+
+def test_ops_preflight_failed_sends_webhook_notification(monkeypatch):
+    sent: list[tuple[str, str, dict]] = []
+
+    async def fake_send_notification(event_type: str, summary: str, details: dict):
+        sent.append((event_type, summary, details))
+        return True
+
+    monkeypatch.setattr(
+        app_module,
+        "build_preflight_report",
+        lambda: {
+            "ok": False,
+            "checks": [{"name": "gamma_connectivity", "ok": False, "message": "down"}],
+        },
+    )
+    monkeypatch.setattr(app_module, "_send_notification", fake_send_notification)
+
+    with TestClient(app) as client:
+        res = client.get("/ops/preflight")
+
+    assert res.status_code == 200
+    assert sent
+    assert sent[0][0] == "preflight_failed"
+    assert sent[0][2]["failed_checks"][0]["name"] == "gamma_connectivity"
+
+
+
+def test_lifespan_startup_degraded_sends_webhook_notification(monkeypatch):
+    sent: list[tuple[str, str, dict]] = []
+
+    async def fake_send_notification(event_type: str, summary: str, details: dict):
+        sent.append((event_type, summary, details))
+        return True
+
+    async def failing_bootstrap_market_pool(top_n: int = 10):
+        raise RuntimeError("gamma unavailable")
+
+    def failing_refresh_market_subscriptions():
+        raise RuntimeError("subscription refresh unavailable")
+
+    async def fake_run_price_stream(_market_ids):
+        while True:
+            await __import__("asyncio").sleep(0.05)
+
+    monkeypatch.setattr(app_module, "_send_notification", fake_send_notification)
+    monkeypatch.setattr(app_module.orchestrator, "bootstrap_market_pool", failing_bootstrap_market_pool)
+    monkeypatch.setattr(app_module.orchestrator, "refresh_market_subscriptions", failing_refresh_market_subscriptions)
+    monkeypatch.setattr(app_module.orchestrator, "run_price_stream", fake_run_price_stream)
+
+    with TestClient(app) as client:
+        res = client.get("/health")
+
+    assert res.status_code == 200
+    assert sent
+    assert sent[0][0] == "startup_degraded"
+    assert sent[0][2]["bootstrap_error"] == "gamma unavailable"

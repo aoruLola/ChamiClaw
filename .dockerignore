@@ -1,0 +1,14 @@
+.git
+.worktrees
+.pytest_cache
+.ruff_cache
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+.env.*
+data/
+tests/
+logs/

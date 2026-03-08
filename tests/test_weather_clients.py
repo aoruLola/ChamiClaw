@@ -4,6 +4,7 @@ from datetime import date, datetime, timezone
 import pytest
 
 from chamiclaw.clients.openai_compatible import OpenAICompatibleClient
+from chamiclaw.clients.webhook import WebhookNotifier
 from chamiclaw.clients.open_meteo import OpenMeteoClient
 from chamiclaw.clients.nws import NwsClient
 from chamiclaw.core.models import LlmReviewDecision, LlmReviewRequest
@@ -232,3 +233,90 @@ def test_nws_client_builds_precipitation_snapshot(monkeypatch):
     assert snapshot.source == "nws"
     assert snapshot.precip_probability == pytest.approx(0.7)
     assert snapshot.updated_at == datetime(2026, 1, 4, 22, 0, tzinfo=timezone.utc)
+
+
+
+def test_webhook_notifier_posts_structured_event(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        content = b"ok"
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr("chamiclaw.clients.webhook.httpx.AsyncClient", FakeAsyncClient)
+    notifier = WebhookNotifier(
+        url="https://hooks.example.com/weather",
+        service_name="chamiclaw",
+        environment="prod",
+    )
+
+    delivered = asyncio.run(
+        notifier.send(
+            event_type="weather_batch_completed",
+            summary="batch finished",
+            details={"executed": 2, "rejected": 1},
+        )
+    )
+
+    assert delivered is True
+    assert captured["url"] == "https://hooks.example.com/weather"
+    assert captured["headers"]["Content-Type"] == "application/json"
+    assert captured["json"]["event_type"] == "weather_batch_completed"
+    assert captured["json"]["service"] == "chamiclaw"
+    assert captured["json"]["environment"] == "prod"
+    assert captured["json"]["details"]["executed"] == 2
+    assert notifier.failures_total == 0
+    assert notifier.last_success_ts is not None
+
+
+def test_webhook_notifier_swallow_failures_and_tracks_state(monkeypatch):
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            raise RuntimeError("network down")
+
+    monkeypatch.setattr("chamiclaw.clients.webhook.httpx.AsyncClient", FakeAsyncClient)
+    notifier = WebhookNotifier(
+        url="https://hooks.example.com/weather",
+        service_name="chamiclaw",
+        environment="prod",
+    )
+
+    delivered = asyncio.run(
+        notifier.send(
+            event_type="execution_error",
+            summary="order failed",
+            details={"market_id": "m1"},
+        )
+    )
+
+    assert delivered is False
+    assert notifier.failures_total == 1
+    assert notifier.last_failure_ts is not None

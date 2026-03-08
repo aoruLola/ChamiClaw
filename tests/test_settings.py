@@ -143,6 +143,9 @@ def test_settings_loads_weather_and_llm_defaults(monkeypatch):
     assert settings.weather_strategy_loop_minutes == 720
     assert settings.llm_enabled is False
     assert settings.llm_failsafe_mode == "reject"
+    assert settings.webhook_enabled is False
+    assert settings.webhook_timeout_seconds == 5.0
+    assert settings.webhook_max_retries == 1
 
 
 def test_settings_requires_llm_credentials_when_enabled(monkeypatch):
@@ -151,6 +154,16 @@ def test_settings_requires_llm_credentials_when_enabled(monkeypatch):
     monkeypatch.delenv("LLM_BASE_URL", raising=False)
     monkeypatch.delenv("LLM_API_KEY", raising=False)
     monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    with pytest.raises(ValueError):
+        AppSettings.load()
+
+
+
+def test_settings_requires_webhook_url_when_enabled(monkeypatch):
+    monkeypatch.setenv("EXECUTION_DRY_RUN", "true")
+    monkeypatch.setenv("WEBHOOK_ENABLED", "true")
+    monkeypatch.delenv("WEBHOOK_URL", raising=False)
 
     with pytest.raises(ValueError):
         AppSettings.load()
