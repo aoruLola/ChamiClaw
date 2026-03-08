@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict, deque
 from datetime import date, datetime, timedelta, timezone
+from collections.abc import Awaitable
 from typing import Callable
 
 from chamiclaw.clients.clob import CLOBClient
@@ -69,6 +70,7 @@ class RuntimeOrchestrator:
         llm_failsafe_mode: str = 'reject',
         weather_batch_max_orders: int = 6,
         weather_max_batch_risk_usd: float = 200.0,
+        notify_event: Callable[[str, str, dict], Awaitable[bool] | bool] | None = None,
         now_fn: Callable[[], datetime] | None = None,
     ):
         self.repo = repo
@@ -94,6 +96,7 @@ class RuntimeOrchestrator:
         self.llm_failsafe_mode = llm_failsafe_mode
         self.weather_batch_max_orders = max(weather_batch_max_orders, 1)
         self.weather_max_batch_risk_usd = max(weather_max_batch_risk_usd, 0.0)
+        self.notify_event = notify_event
         self.last_weather_batch_summary: dict[str, int | float] = {
             'candidates': 0,
             'reviewed': 0,
@@ -153,6 +156,18 @@ class RuntimeOrchestrator:
             self.repo.put_info_signal(signal)
             refreshed += 1
         return refreshed
+
+    async def _notify(self, event_type: str, summary: str, details: dict) -> bool:
+        if self.notify_event is None:
+            return False
+        try:
+            outcome = self.notify_event(event_type, summary, details)
+            if asyncio.iscoroutine(outcome):
+                return bool(await outcome)
+            return bool(outcome)
+        except Exception as exc:
+            logger.warning("runtime_notify_failed", event_type=event_type, error=str(exc))
+            return False
 
     def evaluate_phase_gate(self, admin_override: bool = False) -> None:
         if self.phase_gate_service is None:
@@ -283,7 +298,12 @@ class RuntimeOrchestrator:
             )
             try:
                 decision = await self.llm_review_client.review_trade(request)
-            except Exception:
+            except Exception as exc:
+                await self._notify(
+                    'llm_review_failed',
+                    'llm review failed for weather candidate',
+                    {'market_id': candidate.market_id, 'error': str(exc)},
+                )
                 if self.llm_failsafe_mode == 'min_size':
                     resized = candidate.model_copy(deep=True)
                     resized.suggested_size_usd = round(max(resized.suggested_size_usd * 0.25, 0.0), 4)
@@ -342,7 +362,15 @@ class RuntimeOrchestrator:
             if approved.approved and approved.intent is not None:
                 if not self._allow_execution_rate_limit(approved.intent.market_id, approved.intent.action):
                     continue
-            result = await self.execution_engine.execute(approved)
+            try:
+                result = await self.execution_engine.execute(approved)
+            except Exception as exc:
+                await self._notify(
+                    'execution_error',
+                    'weather batch execution raised an exception',
+                    {'market_id': candidate.market_id, 'error': str(exc)},
+                )
+                continue
             if approved.approved and approved.intent is not None and result and result.accepted:
                 signal = PriceSignal(
                     market_id=candidate.market_id,
@@ -358,6 +386,12 @@ class RuntimeOrchestrator:
                     evaluate_phase_gate=False,
                 )
                 executed += 1
+            elif result is not None and result.status == 'execution_error':
+                await self._notify(
+                    'execution_error',
+                    'weather batch execution returned execution_error',
+                    {'market_id': candidate.market_id, 'status': result.status},
+                )
         if executed > 0:
             self.evaluate_phase_gate(admin_override=False)
         self.sync_execution_compensations()

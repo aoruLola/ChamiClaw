@@ -403,3 +403,69 @@ def test_strategy_run_respects_repo_risk_controls_when_repo_has_no_position():
         assert len(app_module.repo.order_records) == 0
     finally:
         app_module.execution_engine.set_dry_run(previous_dry_run)
+
+
+
+def test_ops_notifications_health_endpoint_exposes_webhook_state(monkeypatch):
+    app_module.webhook_notifier = type(
+        "NotifierState",
+        (),
+        {
+            "enabled": True,
+            "failures_total": 2,
+            "last_success_ts": None,
+            "last_failure_ts": None,
+            "last_event_type": "execution_error",
+        },
+    )()
+
+    with TestClient(app) as client:
+        res = client.get("/ops/notifications/health")
+
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["webhook_enabled"] is True
+    assert payload["webhook_failures_total"] == 2
+    assert payload["webhook_last_event_type"] == "execution_error"
+
+
+
+def test_ops_weather_batch_run_sends_webhook_notification(monkeypatch):
+    sent: list[tuple[str, str, dict]] = []
+
+    async def fake_run_weather_batch(*, max_candidates=None, per_market_cap_usd=None):
+        return {"candidates": 3, "reviewed": 2, "executed": 1, "rejected": 1}
+
+    async def fake_send_notification(event_type: str, summary: str, details: dict):
+        sent.append((event_type, summary, details))
+        return True
+
+    monkeypatch.setattr(app_module.orchestrator, "run_weather_batch", fake_run_weather_batch)
+    monkeypatch.setattr(app_module, "_send_notification", fake_send_notification)
+
+    with TestClient(app) as client:
+        res = client.post("/ops/weather/batch/run")
+
+    assert res.status_code == 200
+    assert sent
+    assert sent[0][0] == "weather_batch_completed"
+    assert sent[0][2]["executed"] == 1
+
+
+
+def test_ops_emergency_stop_sends_webhook_notification(monkeypatch):
+    sent: list[tuple[str, str, dict]] = []
+
+    async def fake_send_notification(event_type: str, summary: str, details: dict):
+        sent.append((event_type, summary, details))
+        return True
+
+    monkeypatch.setattr(app_module, "_send_notification", fake_send_notification)
+
+    with TestClient(app) as client:
+        res = client.post("/ops/emergency/stop", params={"pause_minutes": 60, "reason": "ops_test"})
+
+    assert res.status_code == 200
+    assert sent
+    assert sent[0][0] == "emergency_stop_triggered"
+    assert sent[0][2]["reason"] == "ops_test"
