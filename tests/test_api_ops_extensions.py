@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import time
 
 import pytest
@@ -123,6 +123,31 @@ def test_ops_tick_includes_reconciled_orders_field():
     assert res.status_code == 200
     payload = res.json()
     assert "reconciled_orders" in payload
+
+
+def test_ops_weather_batch_run_endpoint_exists(monkeypatch):
+    async def fake_run_weather_batch(*, max_candidates=None, per_market_cap_usd=None):
+        assert max_candidates == 4
+        assert per_market_cap_usd == 25.0
+        return {"candidates": 2, "reviewed": 1, "executed": 1, "rejected": 1}
+
+    monkeypatch.setattr(app_module.orchestrator, "run_weather_batch", fake_run_weather_batch)
+
+    with TestClient(app) as client:
+        res = client.post("/ops/weather/batch/run", params={"max_candidates": 4, "per_market_cap_usd": 25.0})
+
+    assert res.status_code == 200
+    assert res.json()["executed"] == 1
+
+
+def test_ops_weather_batch_last_endpoint_exists(monkeypatch):
+    app_module.orchestrator.last_weather_batch_summary = {"candidates": 1, "reviewed": 1, "executed": 0, "rejected": 1}
+
+    with TestClient(app) as client:
+        res = client.get("/ops/weather/batch/last")
+
+    assert res.status_code == 200
+    assert res.json()["candidates"] == 1
 
 
 def test_health_and_ops_state_expose_price_stream_fields():

@@ -2,23 +2,29 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict, deque
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Callable
 
 from chamiclaw.clients.clob import CLOBClient
 from chamiclaw.core.models import (
     Action,
+    BatchTradeCandidate,
     ExecutionResult,
     FillRecord,
+    LlmReviewRequest,
     Mode,
     NormalizedMarketTick,
     OrderIntent,
+    OrderMode,
     OrderRecord,
     OrderStatus,
+    OrderType,
     PortfolioState,
     Position,
     PriceSignal,
+    Side,
     StrategyParams,
+    WeatherMarketMeta,
 )
 from chamiclaw.engines.price import PriceEngine
 from chamiclaw.engines.execution import ExecutionEngine
@@ -59,6 +65,10 @@ class RuntimeOrchestrator:
         anomaly_debounce_seconds: int = 30,
         execution_rate_limit_per_market_per_minute: int = 3,
         execution_rate_limit_global_per_minute: int = 20,
+        llm_review_client: object | None = None,
+        llm_failsafe_mode: str = 'reject',
+        weather_batch_max_orders: int = 6,
+        weather_max_batch_risk_usd: float = 200.0,
         now_fn: Callable[[], datetime] | None = None,
     ):
         self.repo = repo
@@ -80,6 +90,16 @@ class RuntimeOrchestrator:
         self.anomaly_debounce_seconds = max(anomaly_debounce_seconds, 1)
         self.execution_rate_limit_per_market_per_minute = max(execution_rate_limit_per_market_per_minute, 1)
         self.execution_rate_limit_global_per_minute = max(execution_rate_limit_global_per_minute, 1)
+        self.llm_review_client = llm_review_client
+        self.llm_failsafe_mode = llm_failsafe_mode
+        self.weather_batch_max_orders = max(weather_batch_max_orders, 1)
+        self.weather_max_batch_risk_usd = max(weather_max_batch_risk_usd, 0.0)
+        self.last_weather_batch_summary: dict[str, int | float] = {
+            'candidates': 0,
+            'reviewed': 0,
+            'executed': 0,
+            'rejected': 0,
+        }
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self._price_stream_stop = asyncio.Event()
         self._last_anomaly_refresh_ts: datetime | None = None
@@ -111,6 +131,28 @@ class RuntimeOrchestrator:
             self.repo.put_info_signal(signal)
             count += 1
         return count
+
+    async def info_refresh_weather(
+        self,
+        *,
+        top_n: int | None = None,
+        forecast_date: date | None = None,
+    ) -> int:
+        cards = list(self.repo.markets.values())
+        if not cards:
+            return 0
+        weather_markets = self.market_service.extract_weather_markets(
+            cards,
+            top_n=top_n or max(len(cards), 1),
+        )
+        refreshed = 0
+        default_forecast_date = forecast_date or self._now_fn().date()
+        for meta in weather_markets:
+            target_date = meta.settlement_date or default_forecast_date
+            signal = await self.info_engine.fetch_weather_signal(meta, forecast_date=target_date)
+            self.repo.put_info_signal(signal)
+            refreshed += 1
+        return refreshed
 
     def evaluate_phase_gate(self, admin_override: bool = False) -> None:
         if self.phase_gate_service is None:
@@ -183,6 +225,150 @@ class RuntimeOrchestrator:
         current = self.repo.get_current_params()
         self.strategy_engine.configure(current.params)
         return current.params
+
+
+    def collect_weather_candidates(
+        self,
+        *,
+        max_candidates: int,
+        per_market_cap_usd: float,
+        portfolio: PortfolioState | None = None,
+    ) -> list[BatchTradeCandidate]:
+        markets: list[WeatherMarketMeta] = []
+        consensuses: dict[str, object] = {}
+        for card in self.repo.markets.values():
+            info = self.repo.info_signals.get(card.market_id)
+            if info is None or info.forecast_consensus is None:
+                continue
+            markets.append(
+                WeatherMarketMeta(
+                    market_id=card.market_id,
+                    question=card.question,
+                    location=card.rule_summary or card.question,
+                    resolution_source=(card.resolution_sources[0] if card.resolution_sources else ''),
+                    rule_text=card.rule_text,
+                    active=card.status == 'active',
+                )
+            )
+            consensuses[card.market_id] = info.forecast_consensus
+        working_portfolio = portfolio or self.repo.portfolio
+        return self.strategy_engine.rank_weather_candidates(
+            markets,
+            price_snapshots=self.repo.price_snapshots,
+            consensuses=consensuses,
+            portfolio_equity=working_portfolio.equity,
+            max_candidates=max_candidates,
+            per_market_cap_usd=per_market_cap_usd,
+        )
+
+    async def review_weather_candidates(self, candidates: list[BatchTradeCandidate]) -> list[BatchTradeCandidate]:
+        if self.llm_review_client is None:
+            return [candidate.model_copy(deep=True) for candidate in candidates]
+        reviewed: list[BatchTradeCandidate] = []
+        for candidate in candidates:
+            meta = candidate.weather_meta or WeatherMarketMeta(market_id=candidate.market_id)
+            request = LlmReviewRequest(
+                market_id=candidate.market_id,
+                market_question=candidate.market_question,
+                market_rule=meta.rule_text,
+                location=meta.location,
+                forecast_date=meta.settlement_date or self._now_fn().date(),
+                market_probability=candidate.market_probability,
+                consensus_probability=candidate.consensus_probability,
+                consensus_confidence=candidate.consensus_confidence,
+                data_freshness_minutes=candidate.data_freshness_minutes,
+                edge=candidate.edge,
+                suggested_size_usd=candidate.suggested_size_usd,
+                risk_tags=list(candidate.risk_tags),
+            )
+            try:
+                decision = await self.llm_review_client.review_trade(request)
+            except Exception:
+                if self.llm_failsafe_mode == 'min_size':
+                    resized = candidate.model_copy(deep=True)
+                    resized.suggested_size_usd = round(max(resized.suggested_size_usd * 0.25, 0.0), 4)
+                    if resized.suggested_size_usd > 0:
+                        reviewed.append(resized)
+                continue
+            if decision.decision == 'reject':
+                continue
+            next_candidate = candidate.model_copy(deep=True)
+            if decision.decision == 'resize':
+                multiplier = max(min(decision.size_multiplier, 1.0), 0.0)
+                next_candidate.suggested_size_usd = round(next_candidate.suggested_size_usd * multiplier, 4)
+            if next_candidate.suggested_size_usd <= 0:
+                continue
+            reviewed.append(next_candidate)
+        return reviewed
+
+    async def run_weather_batch(
+        self,
+        *,
+        max_candidates: int | None = None,
+        per_market_cap_usd: float | None = None,
+        portfolio: PortfolioState | None = None,
+    ) -> dict[str, int | float]:
+        working_portfolio = portfolio or self.repo.portfolio
+        candidates = self.collect_weather_candidates(
+            max_candidates=max_candidates or 12,
+            per_market_cap_usd=per_market_cap_usd or 50.0,
+            portfolio=working_portfolio,
+        )
+        reviewed = await self.review_weather_candidates(candidates)
+        executable: list[BatchTradeCandidate] = []
+        batch_risk_used = 0.0
+        for candidate in reviewed:
+            if len(executable) >= self.weather_batch_max_orders:
+                break
+            if self.weather_max_batch_risk_usd > 0 and batch_risk_used + candidate.suggested_size_usd > self.weather_max_batch_risk_usd:
+                continue
+            executable.append(candidate)
+            batch_risk_used += candidate.suggested_size_usd
+        reviewed = executable
+        executed = 0
+        for candidate in reviewed:
+            intent = OrderIntent(
+                market_id=candidate.market_id,
+                side=Side.YES if candidate.edge >= 0 else Side.NO,
+                action=Action.OPEN,
+                order_type=OrderType.LIMIT,
+                limit_price=candidate.market_probability,
+                size_usd=candidate.suggested_size_usd,
+                mode=OrderMode.A,
+                thesis='WEATHER_BATCH edge entry',
+                ttl_seconds=600,
+            )
+            approved = self.risk_engine.validate(intent, working_portfolio)
+            if approved.approved and approved.intent is not None:
+                if not self._allow_execution_rate_limit(approved.intent.market_id, approved.intent.action):
+                    continue
+            result = await self.execution_engine.execute(approved)
+            if approved.approved and approved.intent is not None and result and result.accepted:
+                signal = PriceSignal(
+                    market_id=candidate.market_id,
+                    spread=0.0,
+                    mid=candidate.market_probability,
+                )
+                working_portfolio = self.apply_execution_result(
+                    intent=approved.intent,
+                    result=result,
+                    signal=signal,
+                    portfolio=working_portfolio,
+                    risk_reason=approved.reason,
+                    evaluate_phase_gate=False,
+                )
+                executed += 1
+        if executed > 0:
+            self.evaluate_phase_gate(admin_override=False)
+        self.sync_execution_compensations()
+        summary = {
+            'candidates': len(candidates),
+            'reviewed': len(reviewed),
+            'executed': executed,
+            'rejected': max(len(candidates) - len(reviewed), 0),
+        }
+        self.last_weather_batch_summary = summary
+        return summary
 
     def apply_execution_result(
         self,

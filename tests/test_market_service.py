@@ -1,0 +1,77 @@
+﻿from datetime import datetime, timedelta, timezone
+
+from chamiclaw.core.models import MarketCard
+from chamiclaw.engines.market import MarketService
+
+
+def test_market_service_extracts_us_daily_precip_markets():
+    service = MarketService()
+    cards = [
+        MarketCard(
+            market_id="m1",
+            question="Will it rain in New York, NY tomorrow?",
+            end_time=datetime.now(timezone.utc) + timedelta(hours=20),
+            status="active",
+            rule_text="Resolves based on official NOAA precipitation observation.",
+            rule_summary="New York, NY",
+            resolution_sources=["NOAA"],
+            liquidity_score=0.9,
+            spread_stability=0.8,
+            volume_density=0.7,
+            rule_clarity_score=0.95,
+        ),
+        MarketCard(
+            market_id="m2",
+            question="Will the Yankees win tomorrow?",
+            end_time=datetime.now(timezone.utc) + timedelta(hours=8),
+            status="active",
+            rule_text="Sports result market.",
+            rule_summary="Bronx, NY",
+            liquidity_score=0.95,
+            spread_stability=0.9,
+            volume_density=0.9,
+            rule_clarity_score=0.9,
+        ),
+    ]
+
+    weather_markets = service.extract_weather_markets(cards, top_n=5)
+
+    assert len(weather_markets) == 1
+    assert weather_markets[0].market_id == "m1"
+    assert weather_markets[0].location == "New York, NY"
+
+
+def test_market_service_rejects_non_us_or_non_precip_markets():
+    service = MarketService()
+    cards = [
+        MarketCard(
+            market_id="m3",
+            question="Will it snow in Toronto tomorrow?",
+            end_time=datetime.now(timezone.utc) + timedelta(hours=18),
+            status="active",
+            rule_text="Official Environment Canada observation.",
+            rule_summary="Toronto, ON",
+            resolution_sources=["Environment Canada"],
+            liquidity_score=0.9,
+            spread_stability=0.8,
+            volume_density=0.7,
+            rule_clarity_score=0.95,
+        ),
+        MarketCard(
+            market_id="m4",
+            question="Will the high temperature in Phoenix exceed 100F tomorrow?",
+            end_time=datetime.now(timezone.utc) + timedelta(hours=18),
+            status="active",
+            rule_text="Official NWS high temperature observation.",
+            rule_summary="Phoenix, AZ",
+            resolution_sources=["NWS"],
+            liquidity_score=0.9,
+            spread_stability=0.8,
+            volume_density=0.7,
+            rule_clarity_score=0.95,
+        ),
+    ]
+
+    weather_markets = service.extract_weather_markets(cards, top_n=5)
+
+    assert weather_markets == []
