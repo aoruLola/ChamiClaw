@@ -75,3 +75,90 @@ def test_market_service_rejects_non_us_or_non_precip_markets():
     weather_markets = service.extract_weather_markets(cards, top_n=5)
 
     assert weather_markets == []
+
+
+def test_market_service_extracts_weather_without_resolution_sources_when_gamma_metadata_matches():
+    service = MarketService()
+    cards = [
+        MarketCard(
+            market_id="wx1",
+            question="Will rainfall exceed 0.1mm in Austin, TX tomorrow?",
+            end_time=datetime.now(timezone.utc) + timedelta(hours=16),
+            status="active",
+            active=True,
+            closed=False,
+            archived=False,
+            category="weather",
+            subcategory="precipitation",
+            event_slug="weather-us",
+            market_slug="austin-rainfall",
+            raw_tags=["weather", "rain", "daily"],
+            rule_text="Official observation determines resolution.",
+            rule_summary="Austin, TX",
+            liquidity_score=0.8,
+            spread_stability=0.75,
+            volume_density=0.7,
+            rule_clarity_score=0.8,
+        ),
+    ]
+
+    weather_markets = service.extract_weather_markets(cards, top_n=5)
+
+    assert len(weather_markets) == 1
+    assert weather_markets[0].market_id == "wx1"
+    assert weather_markets[0].location == "Austin, TX"
+
+
+def test_market_service_refresh_pool_weather_only_filters_non_weather_markets():
+    future = datetime.now(timezone.utc) + timedelta(hours=18)
+    weather = MarketCard(
+        market_id="wx1",
+        question="Will it rain in Seattle, WA tomorrow?",
+        end_time=future,
+        status="active",
+        active=True,
+        closed=False,
+        archived=False,
+        category="weather",
+        subcategory="precipitation",
+        event_slug="weather-us",
+        market_slug="seattle-rain",
+        raw_tags=["weather", "rain"],
+        rule_text="Official observation determines resolution.",
+        rule_summary="Seattle, WA",
+        liquidity_score=0.8,
+        spread_stability=0.8,
+        volume_density=0.8,
+        rule_clarity_score=0.9,
+    )
+    politics = MarketCard(
+        market_id="old1",
+        question="Will Trump win the 2020 U.S. presidential election?",
+        end_time=future,
+        status="active",
+        active=True,
+        closed=False,
+        archived=False,
+        category="politics",
+        event_slug="us-election-2020",
+        market_slug="trump-2020",
+        raw_tags=["politics"],
+        rule_text="Political market.",
+        liquidity_score=0.95,
+        spread_stability=0.9,
+        volume_density=0.95,
+        rule_clarity_score=0.8,
+    )
+
+    class FakeGammaClient:
+        async def fetch_markets(self, limit: int = 20, **_kwargs):
+            assert limit == 20
+            return [politics, weather]
+
+    service = MarketService(gamma_client=FakeGammaClient())
+
+    import asyncio
+
+    cards = asyncio.run(service.refresh_pool(top_n=20, weather_only=True))
+
+    assert [card.market_id for card in cards] == ["wx1"]

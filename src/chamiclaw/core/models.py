@@ -57,7 +57,15 @@ class MarketCard(BaseModel):
     outcomes: list[str] = Field(default_factory=lambda: ["YES", "NO"])
     end_time: datetime
     status: str
+    active: bool = True
+    closed: bool = False
+    archived: bool = False
+    category: str = ""
+    subcategory: str = ""
+    event_slug: str = ""
+    market_slug: str = ""
     tags: list[str] = Field(default_factory=list)
+    raw_tags: list[str] = Field(default_factory=list)
     rule_text: str = ""
     rule_summary: str = ""
     resolution_sources: list[str] = Field(default_factory=list)

@@ -10,6 +10,17 @@ from chamiclaw.api.app import app
 def test_ops_preflight_includes_weather_and_llm_checks(monkeypatch):
     monkeypatch.setattr(app_module.settings, "weather_enabled", True)
     monkeypatch.setattr(app_module.settings, "llm_enabled", True)
+    app_module.orchestrator.last_market_pool_stats = {
+        "gamma_fetched_total": 12,
+        "active_markets_total": 3,
+        "weather_markets_total": 1,
+        "weather_markets_rejected_by_reason": {"missing_location": 2},
+        "selected_markets_total": 1,
+    }
+    app_module.orchestrator.last_weather_info_refresh_summary = {
+        "weather_markets": 1,
+        "info_signals": 1,
+    }
 
     def fake_probe(url: str, timeout_seconds: float = 3.0):
         _ = timeout_seconds
@@ -32,6 +43,8 @@ def test_ops_preflight_includes_weather_and_llm_checks(monkeypatch):
     assert "openmeteo_connectivity" in names
     assert "nws_connectivity" in names
     assert "llm_connectivity" in names
+    assert payload["market_pool"]["gamma_fetched_total"] == 12
+    assert payload["weather_info_refresh"]["info_signals"] == 1
 
 
 
@@ -115,8 +128,9 @@ def test_ops_preflight_failed_sends_webhook_notification(monkeypatch):
 
     assert res.status_code == 200
     assert sent
-    assert sent[0][0] == "preflight_failed"
-    assert sent[0][2]["failed_checks"][0]["name"] == "gamma_connectivity"
+    preflight_events = [event for event in sent if event[0] == "preflight_failed"]
+    assert preflight_events
+    assert preflight_events[0][2]["failed_checks"][0]["name"] == "gamma_connectivity"
 
 
 
@@ -127,7 +141,8 @@ def test_lifespan_startup_degraded_sends_webhook_notification(monkeypatch):
         sent.append((event_type, summary, details))
         return True
 
-    async def failing_bootstrap_market_pool(top_n: int = 10):
+    async def failing_bootstrap_market_pool(top_n: int = 10, *, weather_only: bool = False):
+        _ = weather_only
         raise RuntimeError("gamma unavailable")
 
     def failing_refresh_market_subscriptions():

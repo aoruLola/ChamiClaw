@@ -149,6 +149,13 @@ def _notification_health_payload() -> dict[str, object]:
     }
 
 
+def _market_pool_payload() -> dict[str, object]:
+    return {
+        'market_pool': dict(getattr(orchestrator, 'last_market_pool_stats', {})),
+        'weather_info_refresh': dict(getattr(orchestrator, 'last_weather_info_refresh_summary', {})),
+    }
+
+
 async def _send_notification(event_type: str, summary: str, details: dict) -> bool:
     send = getattr(webhook_notifier, 'send', None)
     if send is None:
@@ -215,7 +222,7 @@ async def _strategy_job() -> int:
 
 async def _market_refresh_job() -> int:
     if settings.weather_enabled:
-        return len(await orchestrator.bootstrap_market_pool(top_n=_weather_market_pool_size()))
+        return len(await orchestrator.bootstrap_market_pool(top_n=_weather_market_pool_size(), weather_only=True))
     return orchestrator.market_refresh()
 
 
@@ -225,7 +232,8 @@ async def _price_job() -> int:
 
 async def _info_refresh_job() -> int:
     if settings.weather_enabled:
-        return await orchestrator.info_refresh_weather(top_n=_weather_market_pool_size())
+        summary = await orchestrator.info_refresh_weather(top_n=_weather_market_pool_size())
+        return int(summary["info_signals"])
     return orchestrator.info_refresh()
 
 
@@ -324,7 +332,9 @@ def build_preflight_report() -> dict:
         )
     )
     ok = all(item.ok for item in checks)
-    return PreflightReport(ok=ok, checks=checks).model_dump(mode="json")
+    payload = PreflightReport(ok=ok, checks=checks).model_dump(mode="json")
+    payload.update(_market_pool_payload())
+    return payload
 
 
 @asynccontextmanager
@@ -335,7 +345,8 @@ async def lifespan(_app: FastAPI):
     refresh_error: str | None = None
     try:
         market_ids = await orchestrator.bootstrap_market_pool(
-            top_n=_weather_market_pool_size() if settings.weather_enabled else 10
+            top_n=_weather_market_pool_size() if settings.weather_enabled else 10,
+            weather_only=settings.weather_enabled,
         )
     except Exception as exc:
         bootstrap_error = str(exc)
@@ -401,6 +412,7 @@ async def health() -> dict:
         "weather_enabled": settings.weather_enabled,
         "llm_enabled": settings.llm_enabled,
         "last_weather_batch": orchestrator.last_weather_batch_summary,
+        **_market_pool_payload(),
         **_notification_health_payload(),
     }
 
@@ -428,6 +440,7 @@ async def ops_state() -> dict:
         "weather_enabled": settings.weather_enabled,
         "llm_enabled": settings.llm_enabled,
         "last_weather_batch": orchestrator.last_weather_batch_summary,
+        **_market_pool_payload(),
         **_notification_health_payload(),
     }
 
@@ -554,7 +567,7 @@ async def reset_runtime_state(
 @app.post("/ops/tick")
 async def tick_once() -> dict:
     if settings.weather_enabled:
-        ranked = len(await orchestrator.bootstrap_market_pool(top_n=_weather_market_pool_size()))
+        ranked = len(await orchestrator.bootstrap_market_pool(top_n=_weather_market_pool_size(), weather_only=True))
         info = await orchestrator.info_refresh_weather(top_n=_weather_market_pool_size())
         weather_batch = await orchestrator.run_weather_batch(
             max_candidates=settings.weather_batch_max_candidates,
@@ -563,10 +576,12 @@ async def tick_once() -> dict:
         reconciled_orders = await orchestrator.reconcile_order_statuses(limit=100)
         payload = {
             "ranked": ranked,
-            "info": info,
+            "info": info["info_signals"],
             "mode": 0,
             "executed": weather_batch["executed"],
             "weather_batch": weather_batch,
+            "market_pool": dict(orchestrator.last_market_pool_stats),
+            "weather_info_refresh": dict(info),
             "reconciled_orders": reconciled_orders,
             "phase": repo.phase_gate_state.model_dump(mode="json"),
         }
