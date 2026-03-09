@@ -162,3 +162,47 @@ def test_market_service_refresh_pool_weather_only_filters_non_weather_markets():
     cards = asyncio.run(service.refresh_pool(top_n=20, weather_only=True))
 
     assert [card.market_id for card in cards] == ["wx1"]
+
+
+def test_market_service_handles_naive_end_times_as_utc_for_current_filtering():
+    service = MarketService()
+    naive_future = datetime.utcnow() + timedelta(hours=2)
+    card = MarketCard(
+        market_id="naive1",
+        question="Will it rain in Miami, FL tomorrow?",
+        end_time=naive_future,
+        status="active",
+        active=True,
+        closed=False,
+        archived=False,
+        category="weather",
+        rule_summary="Miami, FL",
+        rule_text="Official observation determines resolution.",
+    )
+
+    assert service._is_current_market(card) is True
+
+
+def test_market_service_extract_weather_markets_handles_naive_end_times():
+    service = MarketService()
+    card = MarketCard(
+        market_id="naive2",
+        question="Will rainfall exceed 0.1mm in Miami, FL tomorrow?",
+        end_time=datetime.utcnow() + timedelta(hours=6),
+        status="active",
+        active=True,
+        closed=False,
+        archived=False,
+        category="weather",
+        subcategory="precipitation",
+        event_slug="weather-us",
+        market_slug="miami-rainfall",
+        raw_tags=["weather", "rain"],
+        rule_summary="Miami, FL",
+        rule_text="Official observation determines resolution.",
+    )
+
+    weather_markets = service.extract_weather_markets([card], top_n=1)
+
+    assert len(weather_markets) == 1
+    assert weather_markets[0].settlement_date is not None
