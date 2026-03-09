@@ -122,7 +122,7 @@ def test_runtime_blocks_mode_b_when_phase_gate_not_open():
             rule_clarity_score=0.9,
         )
     )
-    repo.put_mode_state(ModeState(market_id="m2", mode=Mode.MODE_B_ALLOWED))
+    repo.put_mode_state(ModeState(market_id="m2", mode=Mode.MODE_A_ALLOWED))
     repo.put_price_signal(
         PriceSignal(
             market_id="m2",
@@ -642,6 +642,15 @@ def test_runtime_bootstrap_market_pool_fetches_and_upserts():
 
 def test_runtime_bootstrap_market_pool_supports_weather_only_mode():
     repo = InMemoryRepository()
+    repo.upsert_market(
+        MarketCard(
+            market_id="stale-old",
+            question="Will Joe Biden get Coronavirus before the election?",
+            end_time=datetime.now(timezone.utc) + timedelta(days=1),
+            status="active",
+            active=True,
+        )
+    )
     card = MarketCard(
         market_id="wx1",
         question="Will it rain in Austin, TX tomorrow?",
@@ -686,9 +695,66 @@ def test_runtime_bootstrap_market_pool_supports_weather_only_mode():
 
     subscriptions = asyncio.run(run_bootstrap())
     assert subscriptions == ["wx1"]
-    assert "wx1" in repo.markets
+    assert list(repo.markets.keys()) == ["wx1"]
     assert market_service.last_pool_stats["weather_markets_total"] == 1
 
+
+
+def test_runtime_bootstrap_market_pool_weather_only_prunes_stale_execution_state():
+    repo = InMemoryRepository()
+    stale_market = MarketCard(
+        market_id="stale-old",
+        question="Old weather market",
+        end_time=datetime.now(timezone.utc) + timedelta(days=1),
+        status="active",
+        active=True,
+        category="weather",
+    )
+    replacement_market = MarketCard(
+        market_id="wx1",
+        question="Will it rain in Austin, TX tomorrow?",
+        end_time=datetime.now(timezone.utc) + timedelta(days=1),
+        status="active",
+        active=True,
+        category="weather",
+        subcategory="precipitation",
+        rule_summary="Austin, TX",
+    )
+    repo.upsert_market(stale_market)
+    repo.put_price_signal(
+        PriceSignal(
+            market_id="stale-old",
+            change_5m=0.03,
+            vol_ratio_15m=1.4,
+            spread=0.01,
+            mid=0.52,
+            spread_status=SpreadStatus.stable,
+        )
+    )
+    repo.put_mode_state(ModeState(market_id="stale-old", mode=Mode.MODE_A))
+
+    class FakeMarketService(MarketService):
+        async def refresh_pool(self, top_n: int = 10, *, weather_only: bool = False):
+            assert weather_only is True
+            return [replacement_market]
+
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=FakeMarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        price_engine=PriceEngine(),
+        clob_client=CLOBClient(rest_url="https://rest", ws_url="wss://ws"),
+    )
+
+    asyncio.run(orchestrator.bootstrap_market_pool(top_n=5, weather_only=True))
+
+    assert list(repo.markets.keys()) == ["wx1"]
+    assert "stale-old" not in repo.mode_states
+    assert "stale-old" not in repo.price_signals
 
 def test_runtime_strategy_loop_respects_rate_limit_per_market_per_minute():
     fixed_now = datetime(2026, 1, 1, tzinfo=timezone.utc)

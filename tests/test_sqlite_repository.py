@@ -161,6 +161,50 @@ def test_sqlite_repository_persists_phase_state_and_orders(tmp_path):
     repo2.close()
 
 
+
+def test_sqlite_repository_replace_markets_prunes_stale_market_state(tmp_path):
+    db = tmp_path / "replace_markets.db"
+    repo = SqliteRepository(str(db))
+
+    stale_market = MarketCard(
+        market_id="stale-old",
+        question="Old weather market",
+        end_time=datetime.now(timezone.utc) + timedelta(days=1),
+        status="active",
+        active=True,
+    )
+    replacement_market = MarketCard(
+        market_id="wx1",
+        question="Will it rain in Austin, TX tomorrow?",
+        end_time=datetime.now(timezone.utc) + timedelta(days=1),
+        status="active",
+        active=True,
+    )
+
+    repo.upsert_market(stale_market)
+    repo.put_price_signal(
+        PriceSignal(
+            market_id="stale-old",
+            change_5m=0.03,
+            vol_ratio_15m=1.4,
+            spread=0.01,
+            mid=0.52,
+            spread_status=SpreadStatus.stable,
+        )
+    )
+    repo.put_info_signal(InfoSignal(market_id="stale-old", source_tier=1, confidence=0.8))
+    repo.put_mode_state(ModeState(market_id="stale-old", mode=Mode.MODE_A))
+
+    repo.replace_markets([replacement_market])
+    repo.close()
+
+    repo2 = SqliteRepository(str(db))
+    assert list(repo2.markets.keys()) == ["wx1"]
+    assert "stale-old" not in repo2.price_signals
+    assert "stale-old" not in repo2.info_signals
+    assert "stale-old" not in repo2.mode_states
+    repo2.close()
+
 def test_sqlite_repository_replay_window_filters_by_time(tmp_path):
     db = tmp_path / "replay.db"
     repo = SqliteRepository(str(db))

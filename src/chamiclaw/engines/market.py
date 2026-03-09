@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from chamiclaw.clients.gamma import GammaClient
 from chamiclaw.core.models import MarketCard, WeatherMarketMeta
@@ -15,10 +15,21 @@ _LOCATION_RE = re.compile(r"([A-Za-z .'-]+,\s*[A-Z]{2})")
 
 
 class MarketService:
-    def __init__(self, gamma_client: GammaClient | None = None):
+    def __init__(
+        self,
+        gamma_client: GammaClient | None = None,
+        *,
+        weather_event_page_size: int = 50,
+        weather_event_max_pages: int = 5,
+    ):
         self.gamma_client = gamma_client
+        self.weather_event_page_size = max(weather_event_page_size, 1)
+        self.weather_event_max_pages = max(weather_event_max_pages, 1)
         self.last_pool_stats: dict[str, object] = {
             "gamma_fetched_total": 0,
+            "gamma_events_scanned": 0,
+            "gamma_markets_expanded": 0,
+            "gamma_scan_limit_hit": False,
             "active_markets_total": 0,
             "weather_markets_total": 0,
             "weather_markets_rejected_by_reason": {},
@@ -27,10 +38,25 @@ class MarketService:
     async def refresh_pool(self, top_n: int = 10, *, weather_only: bool = False) -> list[MarketCard]:
         if self.gamma_client is None:
             return []
-        cards = await self.gamma_client.fetch_markets(limit=max(20, top_n))
+        discovery_stats: dict[str, object] = {
+            "gamma_fetched_total": 0,
+            "gamma_events_scanned": 0,
+            "gamma_markets_expanded": 0,
+            "gamma_scan_limit_hit": False,
+        }
+        if weather_only and hasattr(self.gamma_client, "fetch_event_markets"):
+            cards, event_stats = await self.gamma_client.fetch_event_markets(
+                page_size=self.weather_event_page_size,
+                max_pages=self.weather_event_max_pages,
+            )
+            discovery_stats["gamma_fetched_total"] = len(cards)
+            discovery_stats.update(event_stats)
+        else:
+            cards = await self.gamma_client.fetch_markets(limit=max(20, top_n))
+            discovery_stats["gamma_fetched_total"] = len(cards)
         current_cards = [card for card in cards if self._is_current_market(card)]
         self.last_pool_stats = {
-            "gamma_fetched_total": len(cards),
+            **discovery_stats,
             "active_markets_total": len(current_cards),
             "weather_markets_total": 0,
             "weather_markets_rejected_by_reason": {},
@@ -72,7 +98,7 @@ class MarketService:
                     weather_type='daily_precipitation',
                     resolution_source=(card.resolution_sources[0] if card.resolution_sources else ''),
                     rule_text=card.rule_text,
-                    settlement_date=card.end_time.astimezone(timezone.utc).date(),
+                    settlement_date=self._normalize_market_end_time(card).date(),
                     active=True,
                 )
             )
@@ -103,6 +129,8 @@ class MarketService:
             return False, "inactive_or_expired", ""
         if not self._is_weather_family(card):
             return False, "not_weather_family", ""
+        if not self._is_daily_weather_window(card):
+            return False, "not_daily_window", ""
         if not self._is_precipitation_market(card):
             return False, "not_daily_precipitation", ""
         location = self._extract_location(card)
@@ -114,13 +142,19 @@ class MarketService:
 
     @staticmethod
     def _extract_location(card: MarketCard) -> str:
-        for text in (card.rule_summary, card.question):
+        for text in (card.rule_summary, card.question, card.event_title, card.event_description):
             if not text:
                 continue
             match = _LOCATION_RE.search(text)
             if match:
                 return match.group(1).strip()
         return ''
+
+    @staticmethod
+    def _is_daily_weather_window(card: MarketCard) -> bool:
+        now = datetime.now(timezone.utc)
+        end_time = MarketService._normalize_market_end_time(card)
+        return end_time <= now + timedelta(days=3)
 
     @staticmethod
     def _is_precipitation_market(card: MarketCard) -> bool:
@@ -134,12 +168,15 @@ class MarketService:
                     card.category,
                     card.subcategory,
                     card.event_slug,
+                    card.event_title,
+                    card.event_description,
+                    card.event_resolution_source,
                     card.market_slug,
                     " ".join(card.raw_tags),
                 ],
             )
         ).lower()
-        precip_keywords = ('rain', 'precipitation', 'precip', 'shower', 'rainfall')
+        precip_keywords = ('rain', 'precipitation', 'precip', 'shower', 'showers', 'rainfall')
         excluded_keywords = ('snow', 'temperature', 'high temperature', 'win ', 'score', 'touchdown')
         return any(word in text for word in precip_keywords) and not any(word in text for word in excluded_keywords)
 
@@ -158,6 +195,9 @@ class MarketService:
                     card.category,
                     card.subcategory,
                     card.event_slug,
+                    card.event_title,
+                    card.event_description,
+                    card.event_resolution_source,
                     card.market_slug,
                     " ".join(card.raw_tags),
                     card.question,
@@ -166,7 +206,18 @@ class MarketService:
             )
         ).lower()
         include_tokens = ("weather", "rain", "rainfall", "precip", "precipitation", "forecast")
-        exclude_tokens = ("election", "president", "mlb", "nba", "btc", "ethereum", "stock", "touchdown", "goal")
+        exclude_tokens = (
+            "election",
+            "president",
+            "mlb",
+            "nba",
+            "btc",
+            "ethereum",
+            "stock",
+            "finance",
+            "touchdown",
+            "goal",
+        )
         return any(token in text for token in include_tokens) and not any(token in text for token in exclude_tokens)
 
     @staticmethod
@@ -175,4 +226,12 @@ class MarketService:
             return False
         if not card.active and card.status != "active":
             return False
-        return card.end_time > datetime.now(timezone.utc)
+        end_time = MarketService._normalize_market_end_time(card)
+        return end_time > datetime.now(timezone.utc)
+
+    @staticmethod
+    def _normalize_market_end_time(card: MarketCard) -> datetime:
+        end_time = card.end_time
+        if end_time.tzinfo is None or end_time.tzinfo.utcoffset(end_time) is None:
+            return end_time.replace(tzinfo=timezone.utc)
+        return end_time.astimezone(timezone.utc)
