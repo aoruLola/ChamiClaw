@@ -153,7 +153,8 @@ class MarketService:
     @staticmethod
     def _is_daily_weather_window(card: MarketCard) -> bool:
         now = datetime.now(timezone.utc)
-        return card.end_time <= now + timedelta(days=3)
+        end_time = MarketService._normalize_market_end_time(card)
+        return end_time <= now + timedelta(days=3)
 
     @staticmethod
     def _is_precipitation_market(card: MarketCard) -> bool:
