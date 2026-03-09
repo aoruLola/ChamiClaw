@@ -63,6 +63,9 @@ class MarketCard(BaseModel):
     category: str = ""
     subcategory: str = ""
     event_slug: str = ""
+    event_title: str = ""
+    event_description: str = ""
+    event_resolution_source: str = ""
     market_slug: str = ""
     tags: list[str] = Field(default_factory=list)
     raw_tags: list[str] = Field(default_factory=list)

@@ -48,6 +48,8 @@ class Repository(Protocol):
 
     def upsert_market(self, market: MarketCard) -> None: ...
 
+    def replace_markets(self, markets: list[MarketCard]) -> None: ...
+
     def put_price_snapshot(self, snapshot: PriceSnapshot) -> None: ...
 
     def put_price_signal(self, signal: PriceSignal) -> None: ...
@@ -158,6 +160,9 @@ class InMemoryRepository:
 
     def upsert_market(self, market: MarketCard) -> None:
         self.markets[market.market_id] = market
+
+    def replace_markets(self, markets: list[MarketCard]) -> None:
+        self.markets = {market.market_id: market for market in markets}
 
     def put_price_snapshot(self, snapshot: PriceSnapshot) -> None:
         self.price_snapshots[snapshot.market_id] = snapshot
@@ -646,6 +651,16 @@ class SqliteRepository(InMemoryRepository):
     def upsert_market(self, market: MarketCard) -> None:
         super().upsert_market(market)
         self._upsert_cache("markets_cache", market.market_id, market.model_dump_json())
+
+    def replace_markets(self, markets: list[MarketCard]) -> None:
+        super().replace_markets(markets)
+        self._conn.execute("DELETE FROM markets_cache")
+        for market in markets:
+            self._conn.execute(
+                "INSERT INTO markets_cache (market_id,payload) VALUES (?,?)",
+                (market.market_id, market.model_dump_json()),
+            )
+        self._conn.commit()
 
     def put_price_snapshot(self, snapshot: PriceSnapshot) -> None:
         super().put_price_snapshot(snapshot)

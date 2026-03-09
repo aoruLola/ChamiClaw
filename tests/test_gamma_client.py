@@ -145,3 +145,91 @@ def test_gamma_client_filters_old_closed_and_archived_markets_and_maps_metadata(
     assert cards[0].market_slug == "rain-austin-tx"
     assert cards[0].raw_tags == ["weather", "rain", "us"]
     assert cards[0].rule_summary == "Daily weather market for Austin, TX"
+
+
+def test_gamma_client_fetches_event_markets_with_pagination_and_filters_non_tradeable(monkeypatch):
+    future = (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat().replace("+00:00", "Z")
+    pages = [
+        [
+            {
+                "id": "evt-weather-1",
+                "title": "Rain in Austin tomorrow?",
+                "slug": "rain-austin-tx",
+                "description": "Daily rainfall event for Austin, TX",
+                "markets": [
+                    {
+                        "id": "weather-1",
+                        "question": "Will it rain in Austin, TX tomorrow?",
+                        "description": "Austin, TX rain market",
+                        "resolutionSource": "NWS",
+                        "slug": "will-it-rain-in-austin",
+                        "endDate": future,
+                        "active": True,
+                        "closed": False,
+                        "archived": False,
+                        "enableOrderBook": True,
+                        "clobTokenIds": ["91001", "91002"],
+                    },
+                    {
+                        "id": "weather-2",
+                        "question": "Will it rain in Dallas, TX tomorrow?",
+                        "description": "Dallas market without order book",
+                        "slug": "will-it-rain-in-dallas",
+                        "endDate": future,
+                        "active": True,
+                        "closed": False,
+                        "archived": False,
+                        "enableOrderBook": False,
+                    },
+                ],
+            }
+        ],
+        [],
+    ]
+    captured: list[tuple[str, dict | None]] = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+            self.content = b"ok"
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            self.calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, params=None):
+            captured.append((url, params))
+            payload = pages[len(captured) - 1]
+            return FakeResponse(payload)
+
+    monkeypatch.setattr("chamiclaw.clients.gamma.httpx.AsyncClient", FakeAsyncClient)
+    client = GammaClient(base_url="https://gamma")
+
+    cards, stats = asyncio.run(client.fetch_event_markets(page_size=1, max_pages=3))
+
+    assert len(cards) == 1
+    assert cards[0].market_id == "91001"
+    assert cards[0].event_slug == "rain-austin-tx"
+    assert cards[0].event_title == "Rain in Austin tomorrow?"
+    assert stats["gamma_events_scanned"] == 1
+    assert stats["gamma_markets_expanded"] == 2
+    assert stats["gamma_scan_limit_hit"] is False
+    assert captured[0][0] == "https://gamma/events"
+    assert captured[0][1]["closed"] is False
+    assert captured[0][1]["order"] == "id"
+    assert captured[0][1]["ascending"] is False
+    assert captured[0][1]["offset"] == 0
+    assert captured[1][1]["offset"] == 1

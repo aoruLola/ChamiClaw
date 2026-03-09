@@ -642,6 +642,15 @@ def test_runtime_bootstrap_market_pool_fetches_and_upserts():
 
 def test_runtime_bootstrap_market_pool_supports_weather_only_mode():
     repo = InMemoryRepository()
+    repo.upsert_market(
+        MarketCard(
+            market_id="stale-old",
+            question="Will Joe Biden get Coronavirus before the election?",
+            end_time=datetime.now(timezone.utc) + timedelta(days=1),
+            status="active",
+            active=True,
+        )
+    )
     card = MarketCard(
         market_id="wx1",
         question="Will it rain in Austin, TX tomorrow?",
@@ -686,7 +695,7 @@ def test_runtime_bootstrap_market_pool_supports_weather_only_mode():
 
     subscriptions = asyncio.run(run_bootstrap())
     assert subscriptions == ["wx1"]
-    assert "wx1" in repo.markets
+    assert list(repo.markets.keys()) == ["wx1"]
     assert market_service.last_pool_stats["weather_markets_total"] == 1
 
 

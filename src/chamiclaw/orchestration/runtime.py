@@ -105,6 +105,9 @@ class RuntimeOrchestrator:
         }
         self.last_market_pool_stats: dict[str, object] = {
             'gamma_fetched_total': 0,
+            'gamma_events_scanned': 0,
+            'gamma_markets_expanded': 0,
+            'gamma_scan_limit_hit': False,
             'active_markets_total': 0,
             'weather_markets_total': 0,
             'weather_markets_rejected_by_reason': {},
@@ -130,8 +133,11 @@ class RuntimeOrchestrator:
 
     async def bootstrap_market_pool(self, top_n: int = 10, *, weather_only: bool = False) -> list[str]:
         refreshed = await self.market_service.refresh_pool(top_n=top_n, weather_only=weather_only)
-        for card in refreshed:
-            self.repo.upsert_market(card)
+        if weather_only:
+            self.repo.replace_markets(refreshed)
+        else:
+            for card in refreshed:
+                self.repo.upsert_market(card)
         stats = dict(getattr(self.market_service, "last_pool_stats", {}))
         stats["selected_markets_total"] = len(refreshed)
         self.last_market_pool_stats = stats
