@@ -162,7 +162,20 @@ class InMemoryRepository:
         self.markets[market.market_id] = market
 
     def replace_markets(self, markets: list[MarketCard]) -> None:
+        active_market_ids = {market.market_id for market in markets}
         self.markets = {market.market_id: market for market in markets}
+        self.price_snapshots = {
+            market_id: snapshot for market_id, snapshot in self.price_snapshots.items() if market_id in active_market_ids
+        }
+        self.price_signals = {
+            market_id: signal for market_id, signal in self.price_signals.items() if market_id in active_market_ids
+        }
+        self.info_signals = {
+            market_id: signal for market_id, signal in self.info_signals.items() if market_id in active_market_ids
+        }
+        self.mode_states = {
+            market_id: state for market_id, state in self.mode_states.items() if market_id in active_market_ids
+        }
 
     def put_price_snapshot(self, snapshot: PriceSnapshot) -> None:
         self.price_snapshots[snapshot.market_id] = snapshot
@@ -654,6 +667,14 @@ class SqliteRepository(InMemoryRepository):
 
     def replace_markets(self, markets: list[MarketCard]) -> None:
         super().replace_markets(markets)
+        market_ids = tuple(self.markets.keys())
+        if market_ids:
+            placeholders = ",".join("?" for _ in market_ids)
+            for table in ("price_snapshot_cache", "price_signal_cache", "info_signal_cache", "mode_state_cache"):
+                self._conn.execute(f"DELETE FROM {table} WHERE market_id NOT IN ({placeholders})", market_ids)
+        else:
+            for table in ("price_snapshot_cache", "price_signal_cache", "info_signal_cache", "mode_state_cache"):
+                self._conn.execute(f"DELETE FROM {table}")
         self._conn.execute("DELETE FROM markets_cache")
         for market in markets:
             self._conn.execute(
