@@ -72,7 +72,7 @@ class MarketService:
                     weather_type='daily_precipitation',
                     resolution_source=(card.resolution_sources[0] if card.resolution_sources else ''),
                     rule_text=card.rule_text,
-                    settlement_date=card.end_time.astimezone(timezone.utc).date(),
+                    settlement_date=self._normalize_market_end_time(card).date(),
                     active=True,
                 )
             )
@@ -175,4 +175,12 @@ class MarketService:
             return False
         if not card.active and card.status != "active":
             return False
-        return card.end_time > datetime.now(timezone.utc)
+        end_time = MarketService._normalize_market_end_time(card)
+        return end_time > datetime.now(timezone.utc)
+
+    @staticmethod
+    def _normalize_market_end_time(card: MarketCard) -> datetime:
+        end_time = card.end_time
+        if end_time.tzinfo is None or end_time.tzinfo.utcoffset(end_time) is None:
+            return end_time.replace(tzinfo=timezone.utc)
+        return end_time.astimezone(timezone.utc)
