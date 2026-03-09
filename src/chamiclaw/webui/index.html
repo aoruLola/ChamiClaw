@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChamiClaw Control Surface</title>
+  <link rel="stylesheet" href="/ui/assets/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Operations Dashboard</p>
+        <h1>ChamiClaw Control Surface</h1>
+        <p class="subtitle">A lightweight status view for weather-mode runtime health, market quality, and batch execution.</p>
+      </div>
+      <div class="hero-actions">
+        <button id="refresh-button" type="button">Refresh Now</button>
+        <p id="last-updated">Last updated: waiting for first load</p>
+      </div>
+    </header>
+
+    <section class="grid metrics-grid" id="headline-metrics">
+      <article class="card metric-card">
+        <p class="label">Service Status</p>
+        <h2 id="service-status">Loading</h2>
+        <p id="service-detail" class="muted">Reading /health</p>
+      </article>
+      <article class="card metric-card">
+        <p class="label">Weather Markets</p>
+        <h2 id="weather-market-count">0</h2>
+        <p id="weather-market-detail" class="muted">Eligible weather markets in the latest pool</p>
+      </article>
+      <article class="card metric-card">
+        <p class="label">Info Signals</p>
+        <h2 id="info-signal-count">0</h2>
+        <p id="info-signal-detail" class="muted">Most recent weather info refresh output</p>
+      </article>
+      <article class="card metric-card">
+        <p class="label">Last Batch</p>
+        <h2 id="batch-executed-count">0</h2>
+        <p id="batch-detail" class="muted">Executed candidates in the latest weather batch</p>
+      </article>
+    </section>
+
+    <section class="grid detail-grid">
+      <article class="card">
+        <div class="card-header">
+          <h3>System Health</h3>
+          <span id="health-badge" class="badge neutral">Unknown</span>
+        </div>
+        <dl class="data-list" id="system-health-list"></dl>
+      </article>
+
+      <article class="card">
+        <div class="card-header">
+          <h3>Market Pool Quality</h3>
+          <span id="market-badge" class="badge neutral">Unknown</span>
+        </div>
+        <dl class="data-list" id="market-pool-list"></dl>
+      </article>
+    </section>
+
+    <section class="grid detail-grid">
+      <article class="card">
+        <div class="card-header">
+          <h3>Preflight Checks</h3>
+          <span id="preflight-badge" class="badge neutral">Unknown</span>
+        </div>
+        <ul id="preflight-list" class="stack-list"></ul>
+      </article>
+
+      <article class="card">
+        <div class="card-header">
+          <h3>Recent Runtime Signals</h3>
+          <span id="notification-badge" class="badge neutral">Unknown</span>
+        </div>
+        <dl class="data-list" id="runtime-signal-list"></dl>
+      </article>
+    </section>
+
+    <section class="grid detail-grid">
+      <article class="card">
+        <div class="card-header">
+          <h3>Weather Batch Snapshot</h3>
+          <span class="badge neutral">Latest</span>
+        </div>
+        <dl class="data-list" id="weather-batch-list"></dl>
+      </article>
+
+      <article class="card">
+        <div class="card-header">
+          <h3>Ops State</h3>
+          <span class="badge neutral">Runtime</span>
+        </div>
+        <dl class="data-list" id="ops-state-list"></dl>
+      </article>
+    </section>
+  </main>
+
+  <script src="/ui/assets/app.js" defer></script>
+</body>
+</html>

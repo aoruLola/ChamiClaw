@@ -27,8 +27,8 @@ def stub_price_stream(monkeypatch):
     def fake_refresh_market_subscriptions():
         return ["m1"]
 
-    async def fake_bootstrap_market_pool(top_n: int = 10):
-        _ = top_n
+    async def fake_bootstrap_market_pool(top_n: int = 10, *, weather_only: bool = False):
+        _ = (top_n, weather_only)
         return ["m1"]
 
     async def fake_run_price_stream(_market_ids):
@@ -164,6 +164,43 @@ def test_health_and_ops_state_expose_price_stream_fields():
     assert "price_stream_running" in state_payload
     assert "price_stream_last_event_ts" in state_payload
     assert "price_stream_reconnects" in state_payload
+
+
+def test_health_and_ops_state_expose_market_pool_quality_fields():
+    app_module.orchestrator.last_market_pool_stats = {
+        "gamma_fetched_total": 60,
+        "active_markets_total": 7,
+        "weather_markets_total": 2,
+        "weather_markets_rejected_by_reason": {"not_weather_family": 53},
+        "selected_markets_total": 2,
+    }
+    app_module.orchestrator.last_weather_info_refresh_summary = {
+        "weather_markets": 2,
+        "info_signals": 2,
+    }
+
+    with TestClient(app) as client:
+        health = client.get("/health")
+        state = client.get("/ops/state")
+
+    assert health.status_code == 200
+    assert state.status_code == 200
+    assert health.json()["market_pool"]["gamma_fetched_total"] == 60
+    assert health.json()["weather_info_refresh"]["info_signals"] == 2
+    assert state.json()["market_pool"]["weather_markets_total"] == 2
+    assert state.json()["market_pool"]["weather_markets_rejected_by_reason"]["not_weather_family"] == 53
+
+
+def test_webui_routes_serve_dashboard_and_assets():
+    with TestClient(app) as client:
+        dashboard = client.get("/ui/")
+        asset = client.get("/ui/assets/app.js")
+
+    assert dashboard.status_code == 200
+    assert "text/html" in dashboard.headers["content-type"]
+    assert "ChamiClaw Control Surface" in dashboard.text
+    assert asset.status_code == 200
+    assert "javascript" in asset.headers["content-type"]
 
 
 def test_lifespan_starts_and_stops_price_stream_task(monkeypatch):

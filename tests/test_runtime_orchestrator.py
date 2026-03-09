@@ -615,8 +615,9 @@ def test_runtime_bootstrap_market_pool_fetches_and_upserts():
     )
 
     class FakeMarketService(MarketService):
-        async def refresh_pool(self, top_n: int = 10):
+        async def refresh_pool(self, top_n: int = 10, *, weather_only: bool = False):
             assert top_n == 5
+            assert weather_only is False
             return [card]
 
     orchestrator = RuntimeOrchestrator(
@@ -637,6 +638,56 @@ def test_runtime_bootstrap_market_pool_fetches_and_upserts():
     subscriptions = asyncio.run(run_bootstrap())
     assert subscriptions == ["gm1"]
     assert "gm1" in repo.markets
+
+
+def test_runtime_bootstrap_market_pool_supports_weather_only_mode():
+    repo = InMemoryRepository()
+    card = MarketCard(
+        market_id="wx1",
+        question="Will it rain in Austin, TX tomorrow?",
+        end_time=datetime.now(timezone.utc) + timedelta(days=1),
+        status="active",
+        active=True,
+        category="weather",
+        subcategory="precipitation",
+        rule_summary="Austin, TX",
+    )
+
+    class FakeMarketService(MarketService):
+        def __init__(self):
+            super().__init__()
+            self.last_pool_stats = {
+                "gamma_fetched_total": 60,
+                "active_markets_total": 12,
+                "weather_markets_total": 1,
+                "weather_markets_rejected_by_reason": {"not_weather_family": 11},
+            }
+
+        async def refresh_pool(self, top_n: int = 10, *, weather_only: bool = False):
+            assert top_n == 5
+            assert weather_only is True
+            return [card]
+
+    market_service = FakeMarketService()
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=market_service,
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        price_engine=PriceEngine(),
+        clob_client=CLOBClient(rest_url="https://rest", ws_url="wss://ws"),
+    )
+
+    async def run_bootstrap():
+        return await orchestrator.bootstrap_market_pool(top_n=5, weather_only=True)
+
+    subscriptions = asyncio.run(run_bootstrap())
+    assert subscriptions == ["wx1"]
+    assert "wx1" in repo.markets
+    assert market_service.last_pool_stats["weather_markets_total"] == 1
 
 
 def test_runtime_strategy_loop_respects_rate_limit_per_market_per_minute():
@@ -849,9 +900,50 @@ def test_runtime_info_refresh_weather_fetches_signals_for_weather_markets():
 
     refreshed = asyncio.run(orchestrator.info_refresh_weather())
 
-    assert refreshed == 1
+    assert refreshed["weather_markets"] == 1
+    assert refreshed["info_signals"] == 1
     assert repo.info_signals["m1"].forecast_consensus is not None
     assert repo.info_signals["m1"].forecast_consensus.consensus_probability == 0.66
+
+
+def test_runtime_info_refresh_weather_notifies_when_no_weather_markets_remain():
+    repo = InMemoryRepository()
+    repo.upsert_market(
+        MarketCard(
+            market_id="old1",
+            question="Will Trump win the 2020 U.S. presidential election?",
+            end_time=datetime.now(timezone.utc) + timedelta(days=1),
+            status="active",
+            active=True,
+            category="politics",
+            event_slug="us-election-2020",
+            market_slug="trump-2020",
+            raw_tags=["politics"],
+        )
+    )
+    sent: list[tuple[str, str, dict]] = []
+
+    async def fake_notify(event_type: str, summary: str, details: dict):
+        sent.append((event_type, summary, details))
+        return True
+
+    orchestrator = RuntimeOrchestrator(
+        repo=repo,
+        market_service=MarketService(),
+        info_engine=InfoEngine(),
+        mode_engine=ModeEngine(),
+        strategy_engine=StrategyEngine(),
+        risk_engine=RiskEngine(),
+        execution_engine=ExecutionEngine(adapter=SimmerAdapter()),
+        notify_event=fake_notify,
+    )
+
+    refreshed = asyncio.run(orchestrator.info_refresh_weather())
+
+    assert refreshed == {"weather_markets": 0, "info_signals": 0}
+    assert sent
+    assert sent[0][0] == "weather_market_pool_empty"
+    assert sent[0][2]["weather_info_refresh"]["weather_markets"] == 0
 
 
 def test_runtime_review_weather_candidates_applies_resize():

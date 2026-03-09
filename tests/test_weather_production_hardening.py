@@ -104,13 +104,24 @@ def test_ops_tick_uses_weather_pipeline_when_enabled(monkeypatch):
     calls: list[tuple[str, object]] = []
     monkeypatch.setattr(app_module.settings, "weather_enabled", True)
 
-    async def fake_bootstrap_market_pool(top_n: int = 10):
-        calls.append(("bootstrap_market_pool", top_n))
+    async def fake_bootstrap_market_pool(top_n: int = 10, *, weather_only: bool = False):
+        calls.append(("bootstrap_market_pool", (top_n, weather_only)))
+        app_module.orchestrator.last_market_pool_stats = {
+            "gamma_fetched_total": 40,
+            "active_markets_total": 5,
+            "weather_markets_total": 1,
+            "weather_markets_rejected_by_reason": {"not_weather_family": 35},
+            "selected_markets_total": 1,
+        }
         return ["m-weather"]
 
     async def fake_info_refresh_weather(*, top_n=None):
-        calls.append(("info_refresh_weather", None))
-        return 1
+        calls.append(("info_refresh_weather", top_n))
+        app_module.orchestrator.last_weather_info_refresh_summary = {
+            "weather_markets": 1,
+            "info_signals": 1,
+        }
+        return {"weather_markets": 1, "info_signals": 1}
 
     async def fake_run_weather_batch(*, max_candidates=None, per_market_cap_usd=None):
         calls.append(("run_weather_batch", (max_candidates, per_market_cap_usd)))
@@ -146,6 +157,8 @@ def test_ops_tick_uses_weather_pipeline_when_enabled(monkeypatch):
     assert payload["info"] == 1
     assert payload["executed"] == 1
     assert payload["weather_batch"]["reviewed"] == 1
+    assert payload["market_pool"]["gamma_fetched_total"] == 40
+    assert payload["weather_info_refresh"]["weather_markets"] == 1
     assert any(name == "info_refresh_weather" for name, _ in calls)
     assert any(name == "run_weather_batch" for name, _ in calls)
 

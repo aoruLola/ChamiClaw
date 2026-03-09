@@ -103,6 +103,17 @@ class RuntimeOrchestrator:
             'executed': 0,
             'rejected': 0,
         }
+        self.last_market_pool_stats: dict[str, object] = {
+            'gamma_fetched_total': 0,
+            'active_markets_total': 0,
+            'weather_markets_total': 0,
+            'weather_markets_rejected_by_reason': {},
+            'selected_markets_total': 0,
+        }
+        self.last_weather_info_refresh_summary: dict[str, int] = {
+            'weather_markets': 0,
+            'info_signals': 0,
+        }
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self._price_stream_stop = asyncio.Event()
         self._last_anomaly_refresh_ts: datetime | None = None
@@ -117,10 +128,13 @@ class RuntimeOrchestrator:
             self.repo.upsert_market(card)
         return len(ranked)
 
-    async def bootstrap_market_pool(self, top_n: int = 10) -> list[str]:
-        refreshed = await self.market_service.refresh_pool(top_n=top_n)
+    async def bootstrap_market_pool(self, top_n: int = 10, *, weather_only: bool = False) -> list[str]:
+        refreshed = await self.market_service.refresh_pool(top_n=top_n, weather_only=weather_only)
         for card in refreshed:
             self.repo.upsert_market(card)
+        stats = dict(getattr(self.market_service, "last_pool_stats", {}))
+        stats["selected_markets_total"] = len(refreshed)
+        self.last_market_pool_stats = stats
         return [card.market_id for card in refreshed]
 
     def info_refresh(self, anomaly_only: bool = False) -> int:
@@ -140,14 +154,34 @@ class RuntimeOrchestrator:
         *,
         top_n: int | None = None,
         forecast_date: date | None = None,
-    ) -> int:
+    ) -> dict[str, int]:
         cards = list(self.repo.markets.values())
         if not cards:
-            return 0
+            self.last_weather_info_refresh_summary = {'weather_markets': 0, 'info_signals': 0}
+            await self._notify(
+                'weather_market_pool_empty',
+                'weather info refresh found no markets in repository',
+                {
+                    'market_pool': dict(self.last_market_pool_stats),
+                    'weather_info_refresh': dict(self.last_weather_info_refresh_summary),
+                },
+            )
+            return dict(self.last_weather_info_refresh_summary)
         weather_markets = self.market_service.extract_weather_markets(
             cards,
             top_n=top_n or max(len(cards), 1),
         )
+        if not weather_markets:
+            self.last_weather_info_refresh_summary = {'weather_markets': 0, 'info_signals': 0}
+            await self._notify(
+                'weather_market_pool_empty',
+                'weather info refresh found no eligible weather markets',
+                {
+                    'market_pool': dict(getattr(self.market_service, 'last_pool_stats', {})),
+                    'weather_info_refresh': dict(self.last_weather_info_refresh_summary),
+                },
+            )
+            return dict(self.last_weather_info_refresh_summary)
         refreshed = 0
         default_forecast_date = forecast_date or self._now_fn().date()
         for meta in weather_markets:
@@ -155,7 +189,11 @@ class RuntimeOrchestrator:
             signal = await self.info_engine.fetch_weather_signal(meta, forecast_date=target_date)
             self.repo.put_info_signal(signal)
             refreshed += 1
-        return refreshed
+        self.last_weather_info_refresh_summary = {
+            'weather_markets': len(weather_markets),
+            'info_signals': refreshed,
+        }
+        return dict(self.last_weather_info_refresh_summary)
 
     async def _notify(self, event_type: str, summary: str, details: dict) -> bool:
         if self.notify_event is None:
