@@ -169,6 +169,11 @@ def test_health_and_ops_state_expose_price_stream_fields():
 def test_health_and_ops_state_expose_market_pool_quality_fields():
     app_module.orchestrator.last_market_pool_stats = {
         "gamma_fetched_total": 60,
+        "weather_discovery_mode": "tag_first",
+        "weather_tags_requested": ["weather", "rain"],
+        "weather_tags_resolved": ["weather"],
+        "gamma_events_tagged": 4,
+        "gamma_search_fallback_used": False,
         "active_markets_total": 7,
         "weather_markets_total": 2,
         "weather_markets_rejected_by_reason": {"not_weather_family": 53},
@@ -186,8 +191,10 @@ def test_health_and_ops_state_expose_market_pool_quality_fields():
     assert health.status_code == 200
     assert state.status_code == 200
     assert health.json()["market_pool"]["gamma_fetched_total"] == 60
+    assert health.json()["market_pool"]["weather_discovery_mode"] == "tag_first"
     assert health.json()["weather_info_refresh"]["info_signals"] == 2
     assert state.json()["market_pool"]["weather_markets_total"] == 2
+    assert state.json()["market_pool"]["weather_tags_resolved"] == ["weather"]
     assert state.json()["market_pool"]["weather_markets_rejected_by_reason"]["not_weather_family"] == 53
 
 
@@ -506,3 +513,5 @@ def test_ops_emergency_stop_sends_webhook_notification(monkeypatch):
     assert sent
     assert sent[0][0] == "emergency_stop_triggered"
     assert sent[0][2]["reason"] == "ops_test"
+
+

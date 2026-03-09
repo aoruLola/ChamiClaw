@@ -51,6 +51,12 @@ class AppSettings(BaseModel):
     weather_strategy_loop_minutes: int = 720
     weather_max_position_per_market_usd: float = 50.0
     weather_max_batch_risk_usd: float = 200.0
+    weather_event_tag_slugs: list[str] = ["weather", "rain", "precipitation", "forecast"]
+    weather_event_page_size: int = 50
+    weather_event_max_pages: int = 5
+    weather_search_fallback_enabled: bool = True
+    weather_search_terms: list[str] = ["rain", "precipitation", "rainfall", "showers"]
+    weather_search_limit_per_term: int = 10
     openmeteo_base_url: str = "https://api.open-meteo.com/v1"
     nws_base_url: str = "https://api.weather.gov"
     llm_enabled: bool = False
@@ -73,6 +79,13 @@ class AppSettings(BaseModel):
         if value is None:
             return default
         return value.strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _as_list(value: str | None, default: list[str]) -> list[str]:
+        if value is None:
+            return list(default)
+        items = [part.strip() for part in value.split(",") if part.strip()]
+        return items or list(default)
 
     @staticmethod
     def _validate_thresholds(
@@ -126,6 +139,9 @@ class AppSettings(BaseModel):
         weather_strategy_loop_minutes: int,
         weather_max_position_per_market_usd: float,
         weather_max_batch_risk_usd: float,
+        weather_event_page_size: int,
+        weather_event_max_pages: int,
+        weather_search_limit_per_term: int,
     ) -> None:
         if weather_batch_max_candidates <= 0:
             raise ValueError("WEATHER_BATCH_MAX_CANDIDATES must be > 0.")
@@ -143,6 +159,12 @@ class AppSettings(BaseModel):
             raise ValueError("WEATHER_MAX_POSITION_PER_MARKET_USD must be > 0.")
         if weather_max_batch_risk_usd <= 0:
             raise ValueError("WEATHER_MAX_BATCH_RISK_USD must be > 0.")
+        if weather_event_page_size <= 0:
+            raise ValueError("WEATHER_EVENT_PAGE_SIZE must be > 0.")
+        if weather_event_max_pages <= 0:
+            raise ValueError("WEATHER_EVENT_MAX_PAGES must be > 0.")
+        if weather_search_limit_per_term <= 0:
+            raise ValueError("WEATHER_SEARCH_LIMIT_PER_TERM must be > 0.")
 
     @staticmethod
     def _validate_webhook_runtime(
@@ -243,6 +265,19 @@ class AppSettings(BaseModel):
         weather_strategy_loop_minutes = int(os.getenv("WEATHER_STRATEGY_LOOP_MINUTES", "720"))
         weather_max_position_per_market_usd = float(os.getenv("WEATHER_MAX_POSITION_PER_MARKET_USD", "50.0"))
         weather_max_batch_risk_usd = float(os.getenv("WEATHER_MAX_BATCH_RISK_USD", "200.0"))
+        weather_event_tag_slugs = cls._as_list(
+            os.getenv("WEATHER_EVENT_TAG_SLUGS"), ["weather", "rain", "precipitation", "forecast"]
+        )
+        weather_event_page_size = int(os.getenv("WEATHER_EVENT_PAGE_SIZE", "50"))
+        weather_event_max_pages = int(os.getenv("WEATHER_EVENT_MAX_PAGES", "5"))
+        weather_search_fallback_enabled = cls._as_bool(
+            os.getenv("WEATHER_SEARCH_FALLBACK_ENABLED", "true"),
+            default=True,
+        )
+        weather_search_terms = cls._as_list(
+            os.getenv("WEATHER_SEARCH_TERMS"), ["rain", "precipitation", "rainfall", "showers"]
+        )
+        weather_search_limit_per_term = int(os.getenv("WEATHER_SEARCH_LIMIT_PER_TERM", "10"))
         cls._validate_weather_runtime(
             weather_batch_max_candidates=weather_batch_max_candidates,
             weather_batch_max_orders=weather_batch_max_orders,
@@ -251,6 +286,9 @@ class AppSettings(BaseModel):
             weather_strategy_loop_minutes=weather_strategy_loop_minutes,
             weather_max_position_per_market_usd=weather_max_position_per_market_usd,
             weather_max_batch_risk_usd=weather_max_batch_risk_usd,
+            weather_event_page_size=weather_event_page_size,
+            weather_event_max_pages=weather_event_max_pages,
+            weather_search_limit_per_term=weather_search_limit_per_term,
         )
 
         llm_enabled = cls._as_bool(os.getenv("LLM_ENABLED", "false"), default=False)
@@ -325,6 +363,12 @@ class AppSettings(BaseModel):
             weather_strategy_loop_minutes=weather_strategy_loop_minutes,
             weather_max_position_per_market_usd=weather_max_position_per_market_usd,
             weather_max_batch_risk_usd=weather_max_batch_risk_usd,
+            weather_event_tag_slugs=weather_event_tag_slugs,
+            weather_event_page_size=weather_event_page_size,
+            weather_event_max_pages=weather_event_max_pages,
+            weather_search_fallback_enabled=weather_search_fallback_enabled,
+            weather_search_terms=weather_search_terms,
+            weather_search_limit_per_term=weather_search_limit_per_term,
             openmeteo_base_url=os.getenv("OPENMETEO_BASE_URL", "https://api.open-meteo.com/v1").strip() or "https://api.open-meteo.com/v1",
             nws_base_url=os.getenv("NWS_BASE_URL", "https://api.weather.gov").strip() or "https://api.weather.gov",
             llm_enabled=llm_enabled,

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -77,7 +77,15 @@ webhook_notifier = WebhookNotifier(
     service_name=settings.webhook_service_name,
     environment=settings.webhook_environment,
 )
-market_service = MarketService(gamma_client=gamma_client)
+market_service = MarketService(
+    gamma_client=gamma_client,
+    weather_event_page_size=settings.weather_event_page_size,
+    weather_event_max_pages=settings.weather_event_max_pages,
+    weather_event_tag_slugs=settings.weather_event_tag_slugs,
+    weather_search_fallback_enabled=settings.weather_search_fallback_enabled,
+    weather_search_terms=settings.weather_search_terms,
+    weather_search_limit_per_term=settings.weather_search_limit_per_term,
+)
 price_engine = PriceEngine()
 info_engine = InfoEngine(
     brave_client=brave_client,
@@ -842,3 +850,4 @@ async def optimization_online_apply(window_minutes: int = 60, apply_best: bool =
         reason=payload["reason"],
     )
     return payload
+

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta, timezone
@@ -12,6 +12,8 @@ _US_STATE_CODES = {
     'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY', 'DC'
 }
 _LOCATION_RE = re.compile(r"([A-Za-z .'-]+,\s*[A-Z]{2})")
+_DEFAULT_WEATHER_TAG_SLUGS = ["weather", "rain", "precipitation", "forecast"]
+_DEFAULT_WEATHER_SEARCH_TERMS = ["rain", "precipitation", "rainfall", "showers"]
 
 
 class MarketService:
@@ -21,15 +23,28 @@ class MarketService:
         *,
         weather_event_page_size: int = 50,
         weather_event_max_pages: int = 5,
+        weather_event_tag_slugs: list[str] | None = None,
+        weather_search_fallback_enabled: bool = True,
+        weather_search_terms: list[str] | None = None,
+        weather_search_limit_per_term: int = 10,
     ):
         self.gamma_client = gamma_client
         self.weather_event_page_size = max(weather_event_page_size, 1)
         self.weather_event_max_pages = max(weather_event_max_pages, 1)
+        self.weather_event_tag_slugs = self._normalize_terms(weather_event_tag_slugs or _DEFAULT_WEATHER_TAG_SLUGS)
+        self.weather_search_fallback_enabled = weather_search_fallback_enabled
+        self.weather_search_terms = self._normalize_terms(weather_search_terms or _DEFAULT_WEATHER_SEARCH_TERMS)
+        self.weather_search_limit_per_term = max(weather_search_limit_per_term, 1)
         self.last_pool_stats: dict[str, object] = {
             "gamma_fetched_total": 0,
             "gamma_events_scanned": 0,
+            "gamma_events_tagged": 0,
             "gamma_markets_expanded": 0,
             "gamma_scan_limit_hit": False,
+            "gamma_search_fallback_used": False,
+            "weather_discovery_mode": "tag_first",
+            "weather_tags_requested": list(self.weather_event_tag_slugs),
+            "weather_tags_resolved": [],
             "active_markets_total": 0,
             "weather_markets_total": 0,
             "weather_markets_rejected_by_reason": {},
@@ -38,19 +53,20 @@ class MarketService:
     async def refresh_pool(self, top_n: int = 10, *, weather_only: bool = False) -> list[MarketCard]:
         if self.gamma_client is None:
             return []
+        discovery_rejections: dict[str, int] = {}
         discovery_stats: dict[str, object] = {
             "gamma_fetched_total": 0,
             "gamma_events_scanned": 0,
+            "gamma_events_tagged": 0,
             "gamma_markets_expanded": 0,
             "gamma_scan_limit_hit": False,
+            "gamma_search_fallback_used": False,
+            "weather_discovery_mode": "tag_first",
+            "weather_tags_requested": list(self.weather_event_tag_slugs),
+            "weather_tags_resolved": [],
         }
-        if weather_only and hasattr(self.gamma_client, "fetch_event_markets"):
-            cards, event_stats = await self.gamma_client.fetch_event_markets(
-                page_size=self.weather_event_page_size,
-                max_pages=self.weather_event_max_pages,
-            )
-            discovery_stats["gamma_fetched_total"] = len(cards)
-            discovery_stats.update(event_stats)
+        if weather_only:
+            cards = await self._discover_weather_cards(discovery_stats, discovery_rejections)
         else:
             cards = await self.gamma_client.fetch_markets(limit=max(20, top_n))
             discovery_stats["gamma_fetched_total"] = len(cards)
@@ -59,12 +75,59 @@ class MarketService:
             **discovery_stats,
             "active_markets_total": len(current_cards),
             "weather_markets_total": 0,
-            "weather_markets_rejected_by_reason": {},
+            "weather_markets_rejected_by_reason": dict(discovery_rejections),
         }
         if weather_only:
-            filtered = self._filter_weather_cards(current_cards, top_n=top_n)
+            filtered = self._filter_weather_cards(current_cards, top_n=top_n, seed_rejections=discovery_rejections)
             return self.rank_markets(filtered, top_n=top_n)
         return self.rank_markets(current_cards, top_n=top_n)
+
+    async def _discover_weather_cards(
+        self,
+        discovery_stats: dict[str, object],
+        discovery_rejections: dict[str, int],
+    ) -> list[MarketCard]:
+        if self.gamma_client is None:
+            return []
+        requested = list(self.weather_event_tag_slugs)
+        resolved_tags: list[dict[str, str]] = []
+        if hasattr(self.gamma_client, "resolve_weather_tags"):
+            resolved_tags = await self.gamma_client.resolve_weather_tags(requested)
+        discovery_stats["weather_tags_resolved"] = [str(tag.get("slug") or "") for tag in resolved_tags if tag.get("slug")]
+        cards: list[MarketCard] = []
+        if resolved_tags and hasattr(self.gamma_client, "fetch_weather_events_by_tags"):
+            discovery_stats["weather_discovery_mode"] = "tag_first"
+            cards, stats = await self.gamma_client.fetch_weather_events_by_tags(
+                resolved_tags,
+                page_size=self.weather_event_page_size,
+                max_pages=self.weather_event_max_pages,
+            )
+            discovery_stats.update(stats)
+        elif self.weather_search_fallback_enabled and hasattr(self.gamma_client, "search_weather_events"):
+            discovery_stats["weather_discovery_mode"] = "search_fallback"
+            discovery_stats["gamma_search_fallback_used"] = True
+            discovery_rejections["missing_weather_tag"] = 1
+            cards, stats = await self.gamma_client.search_weather_events(
+                self.weather_search_terms,
+                limit_per_term=self.weather_search_limit_per_term,
+                resolved_tags=resolved_tags,
+            )
+            discovery_stats.update(stats)
+            if not cards:
+                discovery_rejections["search_fallback_no_match"] = 1
+        elif hasattr(self.gamma_client, "fetch_event_markets"):
+            cards, stats = await self.gamma_client.fetch_event_markets(
+                page_size=self.weather_event_page_size,
+                max_pages=self.weather_event_max_pages,
+            )
+            discovery_stats.update(stats)
+            if not resolved_tags:
+                discovery_rejections["missing_weather_tag"] = 1
+        else:
+            cards = await self.gamma_client.fetch_markets(limit=20)
+            discovery_stats["gamma_fetched_total"] = len(cards)
+        discovery_stats["gamma_fetched_total"] = len(cards)
+        return cards
 
     def compute_market_score(self, card: MarketCard) -> float:
         return (
@@ -108,10 +171,16 @@ class MarketService:
         self.last_pool_stats["weather_markets_rejected_by_reason"] = rejected
         return weather_markets
 
-    def _filter_weather_cards(self, cards: list[MarketCard], *, top_n: int) -> list[MarketCard]:
+    def _filter_weather_cards(
+        self,
+        cards: list[MarketCard],
+        *,
+        top_n: int,
+        seed_rejections: dict[str, int] | None = None,
+    ) -> list[MarketCard]:
         ranked = self.rank_markets(cards, top_n=max(top_n, len(cards)))
         accepted_cards: list[MarketCard] = []
-        rejected: dict[str, int] = {}
+        rejected: dict[str, int] = dict(seed_rejections or {})
         for card in ranked:
             accepted, reason, _location = self._classify_weather_card(card)
             if not accepted:
@@ -125,6 +194,8 @@ class MarketService:
         return accepted_cards
 
     def _classify_weather_card(self, card: MarketCard) -> tuple[bool, str, str]:
+        if not self._is_tradeable(card):
+            return False, "non_tradeable", ""
         if not self._is_current_market(card):
             return False, "inactive_or_expired", ""
         if not self._is_weather_family(card):
@@ -132,7 +203,7 @@ class MarketService:
         if not self._is_daily_weather_window(card):
             return False, "not_daily_window", ""
         if not self._is_precipitation_market(card):
-            return False, "not_daily_precipitation", ""
+            return False, "not_precipitation", ""
         location = self._extract_location(card)
         if not location:
             return False, "missing_location", ""
@@ -205,7 +276,7 @@ class MarketService:
                 ],
             )
         ).lower()
-        include_tokens = ("weather", "rain", "rainfall", "precip", "precipitation", "forecast")
+        include_tokens = ("weather", "rain", "rainfall", "precip", "precipitation", "forecast", "showers")
         exclude_tokens = (
             "election",
             "president",
@@ -217,8 +288,14 @@ class MarketService:
             "finance",
             "touchdown",
             "goal",
+            "temperature",
+            "snow",
         )
         return any(token in text for token in include_tokens) and not any(token in text for token in exclude_tokens)
+
+    @staticmethod
+    def _is_tradeable(card: MarketCard) -> bool:
+        return not card.archived and not card.closed and card.order_book_enabled
 
     @staticmethod
     def _is_current_market(card: MarketCard) -> bool:
@@ -235,3 +312,16 @@ class MarketService:
         if end_time.tzinfo is None or end_time.tzinfo.utcoffset(end_time) is None:
             return end_time.replace(tzinfo=timezone.utc)
         return end_time.astimezone(timezone.utc)
+
+    @staticmethod
+    def _normalize_terms(values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            item = value.strip().lower()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            normalized.append(item)
+        return normalized
+

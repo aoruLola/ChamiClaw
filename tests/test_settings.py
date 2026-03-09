@@ -141,6 +141,12 @@ def test_settings_loads_weather_and_llm_defaults(monkeypatch):
     assert settings.weather_market_refresh_minutes == 360
     assert settings.weather_info_refresh_minutes == 360
     assert settings.weather_strategy_loop_minutes == 720
+    assert settings.weather_event_tag_slugs == ["weather", "rain", "precipitation", "forecast"]
+    assert settings.weather_event_page_size == 50
+    assert settings.weather_event_max_pages == 5
+    assert settings.weather_search_fallback_enabled is True
+    assert settings.weather_search_terms == ["rain", "precipitation", "rainfall", "showers"]
+    assert settings.weather_search_limit_per_term == 10
     assert settings.llm_enabled is False
     assert settings.llm_failsafe_mode == "reject"
     assert settings.webhook_enabled is False
@@ -167,3 +173,5 @@ def test_settings_requires_webhook_url_when_enabled(monkeypatch):
 
     with pytest.raises(ValueError):
         AppSettings.load()
+
+

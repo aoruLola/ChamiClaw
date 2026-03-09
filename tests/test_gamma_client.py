@@ -233,3 +233,194 @@ def test_gamma_client_fetches_event_markets_with_pagination_and_filters_non_trad
     assert captured[0][1]["ascending"] is False
     assert captured[0][1]["offset"] == 0
     assert captured[1][1]["offset"] == 1
+
+def test_gamma_client_resolves_weather_tags_ignoring_missing_slugs(monkeypatch):
+    payload = [
+        {"id": 7, "slug": "weather", "label": "Weather"},
+        {"id": 8, "slug": "sports", "label": "Sports"},
+    ]
+
+    class FakeResponse:
+        content = b"ok"
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json():
+            return payload
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url, params=None):
+            assert params is None
+            return FakeResponse()
+
+    monkeypatch.setattr("chamiclaw.clients.gamma.httpx.AsyncClient", FakeAsyncClient)
+    client = GammaClient(base_url="https://gamma")
+
+    resolved = asyncio.run(client.resolve_weather_tags(["weather", "rain"]))
+
+    assert resolved == [{"id": "7", "slug": "weather", "label": "Weather"}]
+
+
+def test_gamma_client_fetch_weather_events_by_tags_uses_tag_filters(monkeypatch):
+    future = (datetime.now(timezone.utc) + timedelta(hours=14)).isoformat().replace("+00:00", "Z")
+    pages = [
+        [
+            {
+                "id": "evt-weather-2",
+                "title": "Rain in Houston, TX tomorrow?",
+                "slug": "rain-houston-tx",
+                "description": "Daily rainfall event for Houston, TX",
+                "active": True,
+                "closed": False,
+                "archived": False,
+                "enableOrderBook": True,
+                "endDate": future,
+                "tags": ["weather"],
+                "markets": [
+                    {
+                        "id": "weather-3",
+                        "question": "Will it rain in Houston, TX tomorrow?",
+                        "description": "Houston precipitation market",
+                        "slug": "rain-houston",
+                        "active": True,
+                        "closed": False,
+                        "archived": False,
+                        "enableOrderBook": True,
+                        "endDate": future,
+                        "clobTokenIds": ["93001", "93002"],
+                    }
+                ],
+            }
+        ],
+        [],
+    ]
+    captured: list[tuple[str, dict | None]] = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+            self.content = b"ok"
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, params=None):
+            captured.append((url, params))
+            return FakeResponse(pages[len(captured) - 1])
+
+    monkeypatch.setattr("chamiclaw.clients.gamma.httpx.AsyncClient", FakeAsyncClient)
+    client = GammaClient(base_url="https://gamma")
+
+    cards, stats = asyncio.run(
+        client.fetch_weather_events_by_tags(
+            [{"id": "7", "slug": "weather", "label": "Weather"}],
+            page_size=1,
+            max_pages=2,
+        )
+    )
+
+    assert len(cards) == 1
+    assert cards[0].market_id == "93001"
+    assert stats["gamma_events_tagged"] == 1
+    assert captured[0][1]["tag_id"] == "7"
+    assert captured[0][1]["active"] is True
+    assert captured[0][1]["closed"] is False
+    assert captured[0][1]["archived"] is False
+
+
+def test_gamma_client_search_weather_events_uses_public_search_fallback(monkeypatch):
+    future = (datetime.now(timezone.utc) + timedelta(hours=18)).isoformat().replace("+00:00", "Z")
+    payload = {
+        "events": [
+            {
+                "id": "evt-weather-3",
+                "title": "Rain in Phoenix, AZ tomorrow?",
+                "slug": "rain-phoenix-az",
+                "description": "Daily rainfall event for Phoenix, AZ",
+                "active": True,
+                "closed": False,
+                "archived": False,
+                "enableOrderBook": True,
+                "endDate": future,
+                "markets": [
+                    {
+                        "id": "weather-4",
+                        "question": "Will it rain in Phoenix, AZ tomorrow?",
+                        "description": "Phoenix rainfall market",
+                        "slug": "rain-phoenix",
+                        "active": True,
+                        "closed": False,
+                        "archived": False,
+                        "enableOrderBook": True,
+                        "endDate": future,
+                        "clobTokenIds": ["94001", "94002"],
+                    }
+                ],
+            }
+        ]
+    }
+    captured: list[tuple[str, dict | None]] = []
+
+    class FakeResponse:
+        content = b"ok"
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json():
+            return payload
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, params=None):
+            captured.append((url, params))
+            return FakeResponse()
+
+    monkeypatch.setattr("chamiclaw.clients.gamma.httpx.AsyncClient", FakeAsyncClient)
+    client = GammaClient(base_url="https://gamma")
+
+    cards, stats = asyncio.run(client.search_weather_events(["rain"], limit_per_term=5, resolved_tags=[]))
+
+    assert len(cards) == 1
+    assert cards[0].market_id == "94001"
+    assert stats["gamma_search_fallback_used"] is True
+    assert captured[0][0] == "https://gamma/public-search"
+    assert captured[0][1]["q"] == "rain"
+    assert captured[0][1]["events_status"] == "active"
+    assert captured[0][1]["keep_closed_markets"] == 0

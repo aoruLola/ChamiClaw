@@ -263,3 +263,110 @@ def test_market_service_refresh_pool_weather_only_uses_event_metadata_and_report
     assert service.last_pool_stats["gamma_events_scanned"] == 4
     assert service.last_pool_stats["gamma_markets_expanded"] == 2
     assert service.last_pool_stats["weather_markets_total"] == 1
+
+
+def test_market_service_refresh_pool_weather_only_prefers_tag_first_discovery():
+    future = datetime.now(timezone.utc) + timedelta(hours=18)
+    weather = MarketCard(
+        market_id="wx3",
+        question="Will measurable precipitation fall tomorrow?",
+        end_time=future,
+        status="active",
+        active=True,
+        closed=False,
+        archived=False,
+        event_slug="rain-portland-or",
+        event_title="Rain in Portland, OR tomorrow?",
+        event_description="Daily rainfall weather event for Portland, OR",
+        market_slug="precip-portland",
+        rule_text="Official observation determines resolution.",
+        liquidity_score=0.8,
+        spread_stability=0.7,
+        volume_density=0.75,
+        rule_clarity_score=0.85,
+    )
+
+    class FakeGammaClient:
+        async def resolve_weather_tags(self, slugs):
+            assert slugs == ["weather", "rain"]
+            return [{"id": "7", "slug": "weather", "label": "Weather"}]
+
+        async def fetch_weather_events_by_tags(self, resolved_tags, **_kwargs):
+            assert resolved_tags == [{"id": "7", "slug": "weather", "label": "Weather"}]
+            return [weather], {
+                "gamma_events_scanned": 3,
+                "gamma_events_tagged": 1,
+                "gamma_markets_expanded": 1,
+                "gamma_scan_limit_hit": False,
+            }
+
+        async def search_weather_events(self, *_args, **_kwargs):
+            raise AssertionError("fallback should not be used when tags resolve")
+
+    service = MarketService(
+        gamma_client=FakeGammaClient(),
+        weather_event_tag_slugs=["weather", "rain"],
+        weather_search_fallback_enabled=True,
+    )
+
+    cards = asyncio.run(service.refresh_pool(top_n=10, weather_only=True))
+
+    assert [card.market_id for card in cards] == ["wx3"]
+    assert service.last_pool_stats["weather_discovery_mode"] == "tag_first"
+    assert service.last_pool_stats["weather_tags_requested"] == ["weather", "rain"]
+    assert service.last_pool_stats["weather_tags_resolved"] == ["weather"]
+    assert service.last_pool_stats["gamma_events_tagged"] == 1
+    assert service.last_pool_stats["gamma_search_fallback_used"] is False
+
+
+def test_market_service_refresh_pool_weather_only_uses_search_fallback_when_tags_missing():
+    future = datetime.now(timezone.utc) + timedelta(hours=20)
+    weather = MarketCard(
+        market_id="wx4",
+        question="Will it rain in Tampa, FL tomorrow?",
+        end_time=future,
+        status="active",
+        active=True,
+        closed=False,
+        archived=False,
+        event_slug="rain-tampa-fl",
+        event_title="Rain in Tampa, FL tomorrow?",
+        event_description="Daily rainfall weather event for Tampa, FL",
+        market_slug="rain-tampa",
+        rule_text="Official observation determines resolution.",
+        liquidity_score=0.78,
+        spread_stability=0.72,
+        volume_density=0.71,
+        rule_clarity_score=0.83,
+    )
+
+    class FakeGammaClient:
+        async def resolve_weather_tags(self, slugs):
+            assert slugs == ["weather"]
+            return []
+
+        async def fetch_weather_events_by_tags(self, *_args, **_kwargs):
+            raise AssertionError("tag discovery should not run without resolved tags")
+
+        async def search_weather_events(self, terms, **_kwargs):
+            assert terms == ["rain"]
+            return [weather], {
+                "gamma_events_scanned": 2,
+                "gamma_markets_expanded": 1,
+                "gamma_search_fallback_used": True,
+            }
+
+    service = MarketService(
+        gamma_client=FakeGammaClient(),
+        weather_event_tag_slugs=["weather"],
+        weather_search_fallback_enabled=True,
+        weather_search_terms=["rain"],
+    )
+
+    cards = asyncio.run(service.refresh_pool(top_n=10, weather_only=True))
+
+    assert [card.market_id for card in cards] == ["wx4"]
+    assert service.last_pool_stats["weather_discovery_mode"] == "search_fallback"
+    assert service.last_pool_stats["weather_tags_requested"] == ["weather"]
+    assert service.last_pool_stats["weather_tags_resolved"] == []
+    assert service.last_pool_stats["gamma_search_fallback_used"] is True

@@ -60,6 +60,7 @@ class MarketCard(BaseModel):
     active: bool = True
     closed: bool = False
     archived: bool = False
+    order_book_enabled: bool = True
     category: str = ""
     subcategory: str = ""
     event_slug: str = ""
@@ -441,3 +442,4 @@ class OptimizationTrial(BaseModel):
 class StrategyParamsSetRequest(BaseModel):
     params: StrategyParams
     source: str = "api"
+

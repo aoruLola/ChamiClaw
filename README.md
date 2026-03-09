@@ -1,4 +1,4 @@
-# ChamiClaw
+﻿# ChamiClaw
 
 ChamiClaw is a Polymarket weather trading service focused on US daily precipitation markets. The current runtime is designed for low-frequency batch execution: weather market discovery, forecast aggregation, rule-based candidate ranking, optional OpenAI-compatible LLM review, risk checks, and automated execution.
 
@@ -38,6 +38,7 @@ open http://127.0.0.1:8000/ui/
 ```
 
 The dashboard is a lightweight read-only control surface backed by the existing ops APIs. It shows service health, market pool quality, preflight checks, webhook status, and the latest weather batch summary.
+The weather discovery path is tag-first: ChamiClaw resolves weather tags from Gamma, fetches tagged active events, and only falls back to `public-search` when no matching tags are available. The market pool stats in `/health`, `/ops/state`, and the Web UI surface the discovery mode, resolved tags, and rejection reasons so we can tell whether Gamma returned no weather events or our local filters rejected them.
 
 ## Important Environment Variables
 
@@ -60,6 +61,12 @@ Weather strategy:
 - `WEATHER_STRATEGY_LOOP_MINUTES=720`
 - `WEATHER_MAX_POSITION_PER_MARKET_USD=50`
 - `WEATHER_MAX_BATCH_RISK_USD=200`
+- `WEATHER_EVENT_TAG_SLUGS=weather,rain,precipitation,forecast`
+- `WEATHER_EVENT_PAGE_SIZE=50`
+- `WEATHER_EVENT_MAX_PAGES=5`
+- `WEATHER_SEARCH_FALLBACK_ENABLED=true`
+- `WEATHER_SEARCH_TERMS=rain,precipitation,rainfall,showers`
+- `WEATHER_SEARCH_LIMIT_PER_TERM=10`
 
 LLM review:
 
@@ -138,3 +145,4 @@ Or use the CLI:
 chamiclaw preflight
 chamiclaw run --profile sim --port 8000
 ```
+

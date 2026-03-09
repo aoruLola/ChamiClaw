@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from collections import defaultdict, deque
@@ -106,8 +106,13 @@ class RuntimeOrchestrator:
         self.last_market_pool_stats: dict[str, object] = {
             'gamma_fetched_total': 0,
             'gamma_events_scanned': 0,
+            'gamma_events_tagged': 0,
             'gamma_markets_expanded': 0,
             'gamma_scan_limit_hit': False,
+            'gamma_search_fallback_used': False,
+            'weather_discovery_mode': 'tag_first',
+            'weather_tags_requested': [],
+            'weather_tags_resolved': [],
             'active_markets_total': 0,
             'weather_markets_total': 0,
             'weather_markets_rejected_by_reason': {},
@@ -893,3 +898,4 @@ class RuntimeOrchestrator:
             return float(value)
         except (TypeError, ValueError):
             return None
+
