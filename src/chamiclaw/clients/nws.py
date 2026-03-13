@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime, timezone
 
@@ -13,7 +13,7 @@ class NwsClient:
         self.timeout_seconds = timeout_seconds
         self.user_agent = user_agent
 
-    async def fetch_precipitation_forecast(
+    async def fetch_temperature_forecast(
         self,
         *,
         latitude: float,
@@ -27,12 +27,12 @@ class NwsClient:
             points_resp.raise_for_status()
             points_payload = points_resp.json() if points_resp.content else {}
             forecast_url = (
-                points_payload.get("properties", {}).get("forecastHourly")
+                points_payload.get("properties", {}).get("forecast")
                 if isinstance(points_payload, dict)
                 else None
             )
             if not forecast_url:
-                raise ValueError("nws points payload missing forecastHourly URL")
+                raise ValueError("nws points payload missing forecast URL")
             forecast_resp = await client.get(str(forecast_url), headers=headers)
             forecast_resp.raise_for_status()
             forecast_payload = forecast_resp.json() if forecast_resp.content else {}
@@ -45,9 +45,13 @@ class NwsClient:
         rows: list[tuple[datetime, float]] = []
         for period in periods:
             start = datetime.fromisoformat(str(period.get("startTime")))
-            value = period.get("probabilityOfPrecipitation", {}).get("value")
-            prob = float(value) if value is not None else 0.0
-            rows.append((start, prob))
+            value = period.get("temperature")
+            # Default NWS uses fahrenheit
+            unit = period.get("temperatureUnit", "F")
+            temp_value = float(value) if value is not None else 0.0
+            if unit == "F":
+                temp_value = round((temp_value - 32) * 5/9, 2)
+            rows.append((start, temp_value))
 
         target_date = rows[0][0].date()
         matched = [row for row in rows if row[0].date() == target_date]
@@ -59,8 +63,7 @@ class NwsClient:
             source="nws",
             valid_at=datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc),
             updated_at=updated_at,
-            precip_probability=max((row[1] for row in matched), default=0.0) / 100.0,
-            precipitation_mm=0.0,
-            source_model="nws-hourly",
+            temperature_celsius=max((row[1] for row in matched), default=0.0),
+            source_model="nws-forecast",
             raw=forecast_payload if isinstance(forecast_payload, dict) else {},
         )

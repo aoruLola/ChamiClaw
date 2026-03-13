@@ -124,21 +124,44 @@ class MarketService:
         self.last_pool_stats["weather_markets_rejected_by_reason"] = rejected
         return accepted_cards
 
-    def _classify_weather_card(self, card: MarketCard) -> tuple[bool, str, str]:
-        if not self._is_current_market(card):
-            return False, "inactive_or_expired", ""
+    def _classify_weather_card(self, card: MarketCard) -> tuple[bool, str, WeatherMarketMeta | None]:
         if not self._is_weather_family(card):
-            return False, "not_weather_family", ""
+            return False, "not_weather", None
+        now = datetime.now(timezone.utc)
+        end_time = self._normalize_market_end_time(card)
+        if end_time <= now:
+            return False, "inactive_or_expired", None
         if not self._is_daily_weather_window(card):
-            return False, "not_daily_window", ""
-        if not self._is_precipitation_market(card):
-            return False, "not_daily_precipitation", ""
+            return False, "not_daily_window", None
+        if not self._is_temperature_market(card):
+            return False, "not_temperature", None
+
         location = self._extract_location(card)
         if not location:
-            return False, "missing_location", ""
+            return False, "missing_location", None
         if not self._is_us_location(location):
-            return False, "non_us_location", ""
-        return True, "accepted", location
+            return False, "non_us_location", None
+
+        threshold, is_or_higher = self._extract_temperature_threshold(card)
+        if threshold is None:
+            return False, "missing_threshold", None
+
+        meta = WeatherMarketMeta(
+            market_id=card.market_id,
+            question=card.question,
+            location=location,
+            country_code="US",
+            latitude=0.0,
+            longitude=0.0,
+            weather_type="high_temperature",
+            temperature_threshold=threshold,
+            is_or_higher=is_or_higher,
+            resolution_source=card.event_resolution_source,
+            rule_text=card.rule_text,
+            settlement_date=end_time.date() if end_time else None,
+            active=True,
+        )
+        return True, "accepted", meta
 
     @staticmethod
     def _extract_location(card: MarketCard) -> str:
@@ -157,7 +180,7 @@ class MarketService:
         return end_time <= now + timedelta(days=3)
 
     @staticmethod
-    def _is_precipitation_market(card: MarketCard) -> bool:
+    def _is_temperature_market(card: MarketCard) -> bool:
         text = " ".join(
             filter(
                 None,
@@ -176,9 +199,43 @@ class MarketService:
                 ],
             )
         ).lower()
-        precip_keywords = ('rain', 'precipitation', 'precip', 'shower', 'showers', 'rainfall')
-        excluded_keywords = ('snow', 'temperature', 'high temperature', 'win ', 'score', 'touchdown')
-        return any(word in text for word in precip_keywords) and not any(word in text for word in excluded_keywords)
+        temperature_keywords = ('temperature', 'highest temperature')
+        excluded_keywords = ('win ', 'score', 'touchdown')
+        return any(word in text for word in temperature_keywords) and not any(word in text for word in excluded_keywords)
+
+    @staticmethod
+    def _extract_temperature_threshold(card: MarketCard) -> tuple[float | None, bool]:
+        # Examples: "Will the highest temperature in Paris be 16°C or higher on March 15?"
+        # "Will the highest temperature in Singapore be 26°C or below on March 15?"
+        # "Will the highest temperature in Singapore be 27°C on March 15?"
+        # Also need to handle Farenheit if it exists e.g "be 50°F"
+        text = card.question.lower()
+        # Find something like 26°c or 26 c or 26
+        match = re.search(r'(\d+(?:\.\d+)?)\s*°?\s*(c|f)?', text)
+        if not match:
+            return None, False
+        
+        val = float(match.group(1))
+        unit = match.group(2)
+        if unit == 'f':
+            val = round((val - 32) * 5/9, 2)
+            
+        is_or_higher = 'or higher' in text or 'or above' in text or 'greater than' in text
+        is_or_below = 'or below' in text or 'or lower' in text or 'less than' in text
+        
+        # If it's a specific exact number, we'll default is_or_higher to False, meaning it's an exact match check (or handled in info.py)
+        # However, looking at polymarket's current questions, they actually are mutually exclusive buckets. 
+        # i.e 26 or below, 27, 28, 29, 30, 31, 32, 33, 34 or higher
+        # so we will pass is_or_higher=True for "34 or higher" and is_or_higher=False for "26 or below".
+        # For exactly 27, we'll need info.py to know it's an exact match. We'll encode this by setting both flags in the logic where it's used, but here we just return the boolean. 
+        # ACTUALLY, let's just use `is_or_higher` to indicate the direction if it's open-ended.
+        
+        if is_or_higher:
+            return val, True
+        elif is_or_below:
+            return val, False
+        else:
+            return val, False # For exact match, info.py will handle it by matching rounded values.
 
     @staticmethod
     def _is_us_location(location: str) -> bool:

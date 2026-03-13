@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from pathlib import Path
@@ -43,7 +43,7 @@ class AppSettings(BaseModel):
     data_retention_days: int = 30
     weather_enabled: bool = True
     weather_only_us_markets: bool = True
-    weather_market_type: str = "daily_precipitation"
+    weather_market_type: str = "high_temperature"
     weather_batch_max_candidates: int = 12
     weather_batch_max_orders: int = 6
     weather_market_refresh_minutes: int = 360
@@ -317,7 +317,7 @@ class AppSettings(BaseModel):
             data_retention_days=data_retention_days,
             weather_enabled=cls._as_bool(os.getenv("WEATHER_ENABLED", "true"), default=True),
             weather_only_us_markets=cls._as_bool(os.getenv("WEATHER_ONLY_US_MARKETS", "true"), default=True),
-            weather_market_type=os.getenv("WEATHER_MARKET_TYPE", "daily_precipitation").strip() or "daily_precipitation",
+            weather_market_type=os.getenv("WEATHER_MARKET_TYPE", "high_temperature").strip() or "high_temperature",
             weather_batch_max_candidates=weather_batch_max_candidates,
             weather_batch_max_orders=weather_batch_max_orders,
             weather_market_refresh_minutes=weather_market_refresh_minutes,

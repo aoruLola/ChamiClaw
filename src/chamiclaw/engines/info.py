@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
@@ -72,7 +72,7 @@ class InfoEngine:
         snapshots: list[ForecastSnapshot] = []
         if self.openmeteo_client is not None:
             snapshots.append(
-                await self.openmeteo_client.fetch_precipitation_forecast(
+                await self.openmeteo_client.fetch_temperature_forecast(
                     latitude=meta.latitude,
                     longitude=meta.longitude,
                     market_id=meta.market_id,
@@ -80,7 +80,7 @@ class InfoEngine:
             )
         if self.nws_client is not None:
             snapshots.append(
-                await self.nws_client.fetch_precipitation_forecast(
+                await self.nws_client.fetch_temperature_forecast(
                     latitude=meta.latitude,
                     longitude=meta.longitude,
                     market_id=meta.market_id,
@@ -146,8 +146,7 @@ class InfoEngine:
             )
 
         consensus = self.build_forecast_consensus(
-            market_id=meta.market_id,
-            location=meta.location,
+            meta=meta,
             forecast_date=forecast_date,
             snapshots=snapshots,
             stale_after_minutes=stale_after_minutes,
@@ -190,13 +189,31 @@ class InfoEngine:
     def build_forecast_consensus(
         self,
         *,
-        market_id: str,
-        location: str,
+        meta: WeatherMarketMeta,
         forecast_date: date,
         snapshots: list[ForecastSnapshot],
         stale_after_minutes: int = 180,
     ) -> ForecastConsensus:
-        probabilities = [snapshot.precip_probability for snapshot in snapshots]
+        # Convert temperature forecast to yes/no probabilities for this specific market
+        probabilities: list[float] = []
+        for snapshot in snapshots:
+            temp = snapshot.temperature_celsius
+            threshold = meta.temperature_threshold
+            
+            prob = 0.0
+            # If the market says "or higher"
+            if meta.is_or_higher:
+                prob = 1.0 if temp >= threshold else 0.0
+            # Exact match (approximate since we don't have "or lower" from our parser if it was an exact number)
+            # Actually, "or below" sets is_or_higher=False. Let's look at the question text directly to be safe
+            elif 'or below' in meta.question.lower() or 'or lower' in meta.question.lower():
+                prob = 1.0 if temp <= threshold else 0.0
+            else:
+                # Exact match bucket
+                prob = 1.0 if round(temp) == round(threshold) else 0.0
+            
+            probabilities.append(prob)
+
         consensus_probability = round(sum(probabilities) / len(probabilities), 4)
         dispersion = round(max(probabilities) - min(probabilities), 4) if len(probabilities) > 1 else 0.0
         freshness_minutes = min(
@@ -207,8 +224,8 @@ class InfoEngine:
         confidence = round(max(0.0, min(1.0, 1.0 - dispersion)), 4)
         primary_source = min(snapshots, key=lambda item: item.updated_at).source if snapshots else ''
         return ForecastConsensus(
-            market_id=market_id,
-            location=location,
+            market_id=meta.market_id,
+            location=meta.location,
             forecast_date=forecast_date,
             consensus_probability=consensus_probability,
             confidence=confidence,

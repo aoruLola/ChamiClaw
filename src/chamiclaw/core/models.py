@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from enum import Enum
@@ -87,7 +87,9 @@ class WeatherMarketMeta(BaseModel):
     country_code: str = "US"
     latitude: float = 0.0
     longitude: float = 0.0
-    weather_type: str = "daily_precipitation"
+    weather_type: str = "high_temperature"
+    temperature_threshold: float = 0.0
+    is_or_higher: bool = False
     resolution_source: str = ""
     rule_text: str = ""
     settlement_date: date | None = None
@@ -137,8 +139,7 @@ class ForecastSnapshot(BaseModel):
     source: str
     valid_at: datetime
     updated_at: datetime = Field(default_factory=utc_now)
-    precip_probability: float = 0.0
-    precipitation_mm: float = 0.0
+    temperature_celsius: float = 0.0
     source_model: str = ""
     location: str = ""
     raw: dict = Field(default_factory=dict)
